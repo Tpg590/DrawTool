@@ -69,6 +69,16 @@ class AppConfig:
     cache_dir: Path = Path(".cache")
     output_dir: Path = Path("output")
     request_timeout: int = 120
+    sdwebui_lora: str = "pixel-art-xl"
+    sdwebui_lora_weight: float = 0.9
+    sdwebui_steps: int = 20
+    sdwebui_cfg_scale: float = 7.0
+    sdwebui_sampler: str = "DPM++ 2M"
+    sdwebui_denoising: float = 0.65
+    sdwebui_negative_prompt: str = (
+        "3d render, realistic, photo, blurry, anti-aliasing, smooth gradient, "
+        "watermark, text, signature, jpeg artifacts"
+    )
 
 
 def _pick(env_key: str, json_data: dict[str, Any], json_key: str, default: Any) -> Any:
@@ -110,6 +120,10 @@ def load_config(
     if llm_provider == "gemini" and not llm_api_key:
         llm_api_key = str(_pick("GEMINI_API_KEY", json_data, "gemini_api_key", ""))
 
+    sdwebui_lora = str(_pick("SDWEBUI_LORA", json_data, "sdwebui_lora", "pixel-art-xl"))
+    if os.environ.get("SDWEBUI_LORA") == "":
+        sdwebui_lora = ""
+
     return AppConfig(
         image_provider=image_provider,
         image_api_url=str(_pick("IMAGE_API_URL", json_data, "image_api_url", "")),
@@ -124,4 +138,19 @@ def load_config(
         cache_dir=Path(str(_pick("CACHE_DIR", json_data, "cache_dir", ".cache"))),
         output_dir=Path(str(_pick("OUTPUT_DIR", json_data, "output_dir", "output"))),
         request_timeout=request_timeout,
+        sdwebui_lora=sdwebui_lora,
+        sdwebui_lora_weight=float(_pick("SDWEBUI_LORA_WEIGHT", json_data, "sdwebui_lora_weight", 0.9)),
+        sdwebui_steps=int(_pick("SDWEBUI_STEPS", json_data, "sdwebui_steps", 20)),
+        sdwebui_cfg_scale=float(_pick("SDWEBUI_CFG_SCALE", json_data, "sdwebui_cfg_scale", 7.0)),
+        sdwebui_sampler=str(_pick("SDWEBUI_SAMPLER", json_data, "sdwebui_sampler", "DPM++ 2M")),
+        sdwebui_denoising=float(_pick("SDWEBUI_DENOISING", json_data, "sdwebui_denoising", 0.65)),
+        sdwebui_negative_prompt=str(
+            _pick(
+                "SDWEBUI_NEGATIVE_PROMPT",
+                json_data,
+                "sdwebui_negative_prompt",
+                "3d render, realistic, photo, blurry, anti-aliasing, smooth gradient, "
+                "watermark, text, signature, jpeg artifacts",
+            )
+        ),
     )

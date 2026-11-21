@@ -36,11 +36,18 @@ Copy-Item .env.example .env
 Chỉnh `.env` theo provider bạn dùng:
 
 ```dotenv
-# Ví dụ dùng local gpt-image-bridge
-IMAGE_PROVIDER=bridge
-IMAGE_API_URL=http://127.0.0.1:8080/v1/images/generations
-IMAGE_API_KEY=
-IMAGE_MODEL=gpt-image-1
+# Ví dụ chạy Local FREE bằng SD WebUI Forge (bật --api) + SDXL + LoRA Pixel Art:
+IMAGE_PROVIDER=sdwebui
+IMAGE_API_URL=http://127.0.0.1:7860
+IMAGE_MODEL=sd_xl_base_1.0.safetensors
+SDWEBUI_LORA=pixel-art-xl
+SDWEBUI_LORA_WEIGHT=0.9
+
+# Hoặc dùng local bridge:
+# IMAGE_PROVIDER=bridge
+# IMAGE_API_URL=http://127.0.0.1:8080/v1/images/generations
+# IMAGE_API_KEY=
+# IMAGE_MODEL=gpt-image-1
 
 # Ví dụ gọi trực tiếp Gemini API (không cần localhost bridge)
 # IMAGE_PROVIDER=gemini

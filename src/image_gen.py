@@ -403,6 +403,115 @@ class GeminiImageProvider(ImageProvider):
         raise ImageGenError("Gemini response did not contain an inline image part.")
 
 
+class SDWebUIImageProvider(ImageProvider):
+    """Local Stable Diffusion WebUI Forge / Automatic1111 REST provider."""
+
+    name = "sdwebui"
+    DEFAULT_BASE_URL = "http://127.0.0.1:7860"
+    DEFAULT_NEGATIVE_PROMPT = (
+        "3d render, realistic, photo, blurry, anti-aliasing, smooth gradient, "
+        "watermark, text, signature, jpeg artifacts"
+    )
+
+    def __init__(
+        self,
+        api_url: str = "",
+        model: str = "",
+        lora: str = "pixel-art-xl",
+        lora_weight: float = 0.9,
+        steps: int = 20,
+        cfg_scale: float = 7.0,
+        sampler: str = "DPM++ 2M",
+        denoising: float = 0.65,
+        negative_prompt: str = "",
+        timeout: int = 120,
+    ) -> None:
+        url = (api_url or "").strip()
+        if url and "/v1/images/generations" in url.lower():
+            url = ""
+        if not url:
+            url = self.DEFAULT_BASE_URL
+        for suffix in ("/sdapi/v1/txt2img", "/sdapi/v1/img2img"):
+            if url.endswith(suffix):
+                url = url[: -len(suffix)]
+        self.base_url = url.rstrip("/")
+
+        clean_model = (model or "").strip()
+        if clean_model.lower().startswith(("gpt-", "dall-e", "gemini", "imagen")):
+            clean_model = ""
+        self.model = clean_model
+
+        clean_lora = (lora or "").strip()
+        self.lora = "" if clean_lora.lower() in ("none", "off", "false") else clean_lora
+        self.lora_weight = float(lora_weight)
+        self.steps = int(steps)
+        self.cfg_scale = float(cfg_scale)
+        self.sampler = sampler or "DPM++ 2M"
+        self.denoising = float(denoising)
+        self.negative_prompt = negative_prompt or self.DEFAULT_NEGATIVE_PROMPT
+        self.timeout = timeout
+
+    def _sdxl_dimensions(self, gen_size: tuple[int, int]) -> tuple[int, int]:
+        w, h = gen_size
+        if w > h:
+            return (1152, 896)
+        if h > w:
+            return (896, 1152)
+        return (1024, 1024)
+
+    def _build_prompt(self, prompt: str) -> str:
+        if self.lora and "<lora:" not in prompt:
+            return f"{prompt}, <lora:{self.lora}:{self.lora_weight:g}>"
+        return prompt
+
+    def generate(
+        self,
+        prompt: str,
+        gen_size: tuple[int, int],
+        target_size: tuple[int, int],
+        ref_path: Path | None = None,
+    ) -> bytes:
+        width, height = self._sdxl_dimensions(gen_size)
+        payload: dict[str, Any] = {
+            "prompt": self._build_prompt(prompt),
+            "negative_prompt": self.negative_prompt,
+            "steps": self.steps,
+            "cfg_scale": self.cfg_scale,
+            "sampler_name": self.sampler,
+            "width": width,
+            "height": height,
+            "batch_size": 1,
+            "n_iter": 1,
+        }
+        if self.model:
+            payload["override_settings"] = {"sd_model_checkpoint": self.model}
+
+        if ref_path is not None:
+            endpoint = f"{self.base_url}/sdapi/v1/img2img"
+            payload["init_images"] = [base64.b64encode(ref_path.read_bytes()).decode("ascii")]
+            payload["denoising_strength"] = self.denoising
+        else:
+            endpoint = f"{self.base_url}/sdapi/v1/txt2img"
+
+        try:
+            raw_resp, resp_ct = _http_post_raw(
+                endpoint,
+                json.dumps(payload).encode("utf-8"),
+                {"Content-Type": "application/json"},
+                self.timeout,
+            )
+        except ImageGenError as exc:
+            if "Failed to reach image API" in str(exc):
+                raise ImageGenError(
+                    f"{exc}. Make sure SD WebUI Forge is running with '--api' at {self.base_url}."
+                ) from exc
+            raise
+
+        if resp_ct.lower().startswith("image/"):
+            return raw_resp
+        return _extract_image_bytes(json.loads(raw_resp.decode("utf-8")), self.timeout)
+
+
 def create_provider(config: AppConfig) -> ImageProvider:
     """Instantiate the configured image generation provider."""
     provider = config.image_provider.strip().lower()
@@ -427,8 +536,22 @@ def create_provider(config: AppConfig) -> ImageProvider:
             model=config.image_model,
             timeout=config.request_timeout,
         )
+    if provider in ("sdwebui", "forge", "a1111"):
+        return SDWebUIImageProvider(
+            api_url=config.image_api_url,
+            model=config.image_model,
+            lora=config.sdwebui_lora,
+            lora_weight=config.sdwebui_lora_weight,
+            steps=config.sdwebui_steps,
+            cfg_scale=config.sdwebui_cfg_scale,
+            sampler=config.sdwebui_sampler,
+            denoising=config.sdwebui_denoising,
+            negative_prompt=config.sdwebui_negative_prompt,
+            timeout=config.request_timeout,
+        )
     raise ImageGenError(
-        f"Unsupported IMAGE_PROVIDER '{config.image_provider}'. Expected 'bridge', 'openai', or 'gemini'."
+        f"Unsupported IMAGE_PROVIDER '{config.image_provider}'. "
+        "Expected 'bridge', 'openai', 'gemini', or 'sdwebui'."
     )
 
 
