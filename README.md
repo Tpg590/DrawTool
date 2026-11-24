@@ -88,7 +88,28 @@ python drawtool.py --prompt "nhân vật hiệp sĩ đi bộ" --type anim --size
 python drawtool.py --prompt "bình máu đỏ" --type item --size 32x32 --raw-image ./sample_raw.png --skip-aseprite
 ```
 
-## 5. Kiểm thử
+## 5. MCP Server cho Aseprite (Antigravity / Cursor / Claude Desktop)
+
+`DrawTool` đi kèm MCP stdio server thuần Python (`mcp_server.py`, không cần cài thêm thư viện ngoài) với 4 tools:
+- `build_pixel_prompt`: Sinh prompt chuẩn 2D 8-bit top-down + kích thước lưới `anim`.
+- `process_image_to_aseprite`: Nhận ảnh thô bất kỳ (từ Gemini Web, Antigravity `image-generator`, hoặc file local), tách nền, resize `NEAREST`, ghép spritesheet / nối cạnh tile, ép bảng màu và đóng gói thành `.aseprite` + `.png`.
+- `generate_game_asset`: Chạy trọn quy trình từ prompt → gọi `IMAGE_PROVIDER` → xử lý pixel → xuất `.aseprite` + `.png`.
+- `check_aseprite_status`: Kiểm tra đường dẫn `aseprite` và trạng thái cấu hình provider.
+
+Cấu hình trong `mcp_config.json` / `settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "drawtool-aseprite": {
+      "command": "python",
+      "args": ["C:/Users/trilt/Documents/Study/DrawTool/mcp_server.py"]
+    }
+  }
+}
+```
+
+## 6. Kiểm thử
 
 ```bash
 python -m unittest discover -s tests -v
