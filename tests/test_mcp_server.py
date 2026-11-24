@@ -54,6 +54,7 @@ class McpServerTests(unittest.TestCase):
             {
                 "build_pixel_prompt",
                 "process_image_to_aseprite",
+                "create_idle_animation",
                 "generate_game_asset",
                 "check_aseprite_status",
             },
@@ -160,6 +161,47 @@ class McpServerTests(unittest.TestCase):
             self.assertEqual(full_data["status"], "ok")
             self.assertTrue(Path(full_data["aseprite_path"]).is_file())
             self.assertTrue(Path(full_data["png_path"]).is_file())
+
+    def test_create_idle_animation_tool_skip_and_mocked_aseprite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_path = root / "mage_single.png"
+            _write_sample_raw(raw_path, size=(96, 96))
+            out_dir = root / "out"
+            cfg = AppConfig(cache_dir=root / "cache", output_dir=out_dir)
+
+            resp = handle_jsonrpc_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 21,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "create_idle_animation",
+                        "arguments": {
+                            "raw_image_path": str(raw_path),
+                            "name": "mage_idle",
+                            "size": "48x48",
+                            "frames": 6,
+                            "cols": 3,
+                            "fps": 6,
+                            "idle_style": "bob",
+                            "bob_px": 1,
+                            "style": "anime-rpg-topdown",
+                            "output_dir": str(out_dir),
+                            "skip_aseprite": True,
+                        },
+                    },
+                },
+                config=cfg,
+            )
+            assert resp is not None
+            self.assertFalse(resp["result"]["isError"])
+            data = json.loads(resp["result"]["content"][0]["text"])
+            self.assertEqual(data["status"], "png_only")
+            self.assertEqual(data["sheet_size"], "144x96")
+            self.assertEqual((data["cols"], data["rows"], data["frames"]), (3, 2, 6))
+            self.assertEqual(data["idle_style"], "bob")
+            self.assertTrue(Path(data["png_path"]).is_file())
 
     def test_check_aseprite_status_does_not_leak_secrets(self) -> None:
         cfg = AppConfig(image_provider="gemini", image_api_key="AIzaSUPERSECRET123")

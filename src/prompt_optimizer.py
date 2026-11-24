@@ -27,6 +27,12 @@ STYLE_PRESETS: dict[str, str] = {
         "limited color palette, clean cel shading, no anti-aliasing, no 3D render, "
         "no text, no watermark"
     ),
+    "anime-rpg-topdown": (
+        "16-bit anime RPG pixel art, top-down 3/4 RPG view, classic SNES/GBA JRPG character aesthetic, "
+        "crisp 1px dark outline, expressive clear anime pixel features, rich limited color palette, "
+        "clean cel shading, strong silhouette readability, no anti-aliasing, no 3D render, "
+        "no text, no watermark"
+    ),
     "isometric-pixel": (
         "isometric pixel art, 2D retro game asset, crisp pixel edges, "
         "limited color palette, simple clean shading, no anti-aliasing, no 3D render, "
@@ -75,17 +81,25 @@ def build_type_layout_prompt(
     frames: int = 4,
     cols: int | None = None,
     has_ref: bool = False,
+    bg_color: str | None = None,
+    action_notes: str | None = None,
 ) -> str:
     """Build deterministic composition instructions tailored to item, tile, or anim."""
     if asset_type not in VALID_ASSET_TYPES:
         raise ValueError(f"Unsupported asset type '{asset_type}'. Expected one of {VALID_ASSET_TYPES}.")
 
     w, h = size
+    clean_bg = " ".join(bg_color.strip().split()) if bg_color else ""
     if asset_type == "item":
+        bg_phrase = (
+            f"solid uniform flat {clean_bg} background for clean background removal"
+            if clean_bg
+            else "solid uniform flat magenta or plain single-color background for clean background removal"
+        )
         layout = (
             f"single isolated game item centered cleanly in frame, sized clearly for a {w}x{h} sprite, "
-            "top-down 2D game perspective, solid uniform flat magenta or plain single-color background "
-            "for clean background removal, strong silhouette and distinct 8-bit contrast shading"
+            f"top-down 2D game perspective, {bg_phrase}, "
+            "strong silhouette and distinct 8-bit contrast shading"
         )
     elif asset_type == "tile":
         layout = (
@@ -95,12 +109,20 @@ def build_type_layout_prompt(
         )
     else:
         resolved_cols, rows = compute_grid(frames, cols)
+        bg_phrase = (
+            f"solid uniform flat {clean_bg} background for clean background removal"
+            if clean_bg
+            else "solid uniform flat single-color background"
+        )
         layout = (
             f"2D sprite sheet arranged in an exact {resolved_cols} columns by {rows} rows uniform grid "
             f"with {frames} animation frames ordered left-to-right top-to-bottom, each cell {w}x{h} proportion, "
             "top-down RPG readable motion sequence, consistent character proportions, outfit, and colors "
-            "across every frame, solid uniform flat single-color background, no visible grid lines or borders"
+            f"across every frame, {bg_phrase}, no visible grid lines or borders"
         )
+        if action_notes and action_notes.strip():
+            clean_notes = " ".join(action_notes.strip().split())
+            layout += f", frame sequence: {clean_notes}"
 
     if has_ref:
         layout += ", match the visual design, proportions, and color palette of the reference image"
@@ -115,6 +137,8 @@ def build_deterministic_prompt(
     cols: int | None = None,
     style: str = DEFAULT_STYLE,
     has_ref: bool = False,
+    bg_color: str | None = None,
+    action_notes: str | None = None,
 ) -> str:
     """Assemble the complete deterministic image prompt without spending LLM tokens."""
     clean_subject = " ".join(subject.strip().split())
@@ -127,6 +151,8 @@ def build_deterministic_prompt(
         frames=frames,
         cols=cols,
         has_ref=has_ref,
+        bg_color=bg_color,
+        action_notes=action_notes,
     )
     style_keywords = get_style_keywords(style)
     return f"{clean_subject}, {layout}, {style_keywords}"
@@ -211,6 +237,8 @@ def optimize_prompt(
     has_ref: bool = False,
     config: AppConfig | None = None,
     use_llm: bool = True,
+    bg_color: str | None = None,
+    action_notes: str | None = None,
 ) -> PromptResult:
     """Optimize prompt using optional tiny-token LLM translation + locked deterministic rules."""
     resolved_cols, rows = compute_grid(frames, cols) if asset_type == "anim" else (1, 1)
@@ -242,6 +270,8 @@ def optimize_prompt(
         cols=resolved_cols if asset_type == "anim" else None,
         style=style,
         has_ref=has_ref,
+        bg_color=bg_color,
+        action_notes=action_notes,
     )
     return PromptResult(
         subject=subject,

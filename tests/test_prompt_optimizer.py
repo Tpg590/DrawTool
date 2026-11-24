@@ -110,6 +110,21 @@ class PromptOptimizerTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, 0)
         self.assertFalse(res.used_llm)
 
+    def test_anime_rpg_preset_bg_color_and_action_notes(self) -> None:
+        prompt = build_deterministic_prompt(
+            subject="white-haired female mage",
+            asset_type="anim",
+            size=(48, 48),
+            frames=4,
+            cols=4,
+            style="anime-rpg-topdown",
+            bg_color="neutral light gray (#D0D0D0)",
+            action_notes="1: idle, 2: step left, 3: idle, 4: step right",
+        )
+        self.assertIn("16-bit anime RPG pixel art", prompt)
+        self.assertIn("neutral light gray (#D0D0D0)", prompt)
+        self.assertIn("frame sequence: 1: idle, 2: step left, 3: idle, 4: step right", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

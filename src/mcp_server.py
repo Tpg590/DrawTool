@@ -25,12 +25,20 @@ from src.image_gen import (
     choose_generation_size,
     create_provider,
 )
-from src.pixel_processor import parse_palette, parse_size, process_asset
+from src.pixel_processor import (
+    VALID_ALIGN_MODES,
+    VALID_DOWNSAMPLE_MODES,
+    VALID_IDLE_STYLES,
+    parse_palette,
+    parse_size,
+    process_asset,
+    process_idle_from_single,
+)
 from src.prompt_optimizer import DEFAULT_STYLE, VALID_ASSET_TYPES, compute_grid, optimize_prompt
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26")
-SERVER_INFO = {"name": "drawtool-aseprite", "version": "0.1.0"}
+SERVER_INFO = {"name": "drawtool-aseprite", "version": "0.2.0"}
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -52,7 +60,19 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "size": {"type": "string", "default": "32x32", "description": "Target sprite/frame WxH."},
                 "frames": {"type": "integer", "minimum": 1, "default": 4},
                 "cols": {"type": "integer", "minimum": 1, "description": "Grid columns for anim (defaults to frames)."},
-                "style": {"type": "string", "default": DEFAULT_STYLE},
+                "style": {
+                    "type": "string",
+                    "default": DEFAULT_STYLE,
+                    "description": "Style preset: 8bit-topdown | 16bit-topdown | anime-rpg-topdown | isometric-pixel.",
+                },
+                "bg_color": {
+                    "type": "string",
+                    "description": "Optional flat background color instruction (e.g. 'neutral light gray (#D0D0D0)' or 'bright green (#00FF00)').",
+                },
+                "action_notes": {
+                    "type": "string",
+                    "description": "Optional frame-by-frame pose/action notes for anim spritesheets.",
+                },
                 "has_ref": {"type": "boolean", "default": False},
                 "use_llm": {"type": "boolean", "default": False},
             },
@@ -63,8 +83,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "process_image_to_aseprite",
         "description": (
             "Process a raw generated image (from Gemini Web, Antigravity image-generator, or local file) "
-            "deterministically: remove background, NEAREST-neighbor resize, slice/align anim spritesheets, "
-            "blend tile seams, quantize palette, and package into .aseprite (Base + Detail & Shading layers) + .png."
+            "deterministically: remove background with chroma despill, filter corner specks, pixel-art "
+            "majority-vote downscale, centroid-align/slice anim spritesheets, blend tile seams, quantize "
+            "palette, and package into .aseprite (Base + Detail & Shading layers) + .png."
         ),
         "inputSchema": {
             "type": "object",
@@ -79,6 +100,59 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "style": {"type": "string", "default": DEFAULT_STYLE},
                 "palette": {"type": "string", "description": "Optional .gpl file or comma-separated hex list."},
                 "max_colors": {"type": "integer", "minimum": 0},
+                "bg_tolerance": {"type": "integer", "minimum": 0, "default": 28},
+                "despill": {"type": "boolean", "default": True},
+                "speck_filter": {"type": "boolean", "default": True},
+                "downsample_mode": {
+                    "type": "string",
+                    "enum": list(VALID_DOWNSAMPLE_MODES),
+                    "default": "mode",
+                },
+                "align_mode": {
+                    "type": "string",
+                    "enum": list(VALID_ALIGN_MODES),
+                    "default": "centroid",
+                },
+                "output_dir": {"type": "string", "description": "Output directory (default: ./output)."},
+                "skip_aseprite": {"type": "boolean", "default": False},
+            },
+            "required": ["raw_image_path"],
+        },
+    },
+    {
+        "name": "create_idle_animation",
+        "description": (
+            "Generate a 100%-consistent multi-frame idle animation spritesheet (.aseprite + .png) "
+            "deterministically from a SINGLE raw character image (zero hallucinated limbs or frame-to-frame "
+            "drift). Supports grounded 2-tier head/torso bobbing ('bob'), gentle breathing ('breathe'), or "
+            "hovering ('float')."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "raw_image_path": {"type": "string", "description": "Path to a single-character raw input image."},
+                "name": {"type": "string", "description": "Output base filename (without extension)."},
+                "size": {"type": "string", "default": "48x48", "description": "Target frame WxH (e.g. 48x48 or 64x64)."},
+                "frames": {"type": "integer", "minimum": 1, "default": 6},
+                "cols": {"type": "integer", "minimum": 1, "description": "Grid columns (defaults to frames)."},
+                "fps": {"type": "number", "exclusiveMinimum": 0, "default": 6.0},
+                "idle_style": {
+                    "type": "string",
+                    "enum": list(VALID_IDLE_STYLES),
+                    "default": "bob",
+                },
+                "bob_px": {"type": "integer", "minimum": 0, "maximum": 8, "default": 1},
+                "style": {"type": "string", "default": DEFAULT_STYLE},
+                "palette": {"type": "string", "description": "Optional .gpl file or comma-separated hex list."},
+                "max_colors": {"type": "integer", "minimum": 0},
+                "bg_tolerance": {"type": "integer", "minimum": 0, "default": 28},
+                "despill": {"type": "boolean", "default": True},
+                "speck_filter": {"type": "boolean", "default": True},
+                "downsample_mode": {
+                    "type": "string",
+                    "enum": list(VALID_DOWNSAMPLE_MODES),
+                    "default": "mode",
+                },
                 "output_dir": {"type": "string", "description": "Output directory (default: ./output)."},
                 "skip_aseprite": {"type": "boolean", "default": False},
             },
@@ -102,9 +176,24 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "cols": {"type": "integer", "minimum": 1},
                 "fps": {"type": "number", "exclusiveMinimum": 0, "default": 8.0},
                 "style": {"type": "string", "default": DEFAULT_STYLE},
+                "bg_color": {"type": "string"},
+                "action_notes": {"type": "string"},
                 "ref_path": {"type": "string"},
                 "palette": {"type": "string"},
                 "max_colors": {"type": "integer", "minimum": 0},
+                "bg_tolerance": {"type": "integer", "minimum": 0, "default": 28},
+                "despill": {"type": "boolean", "default": True},
+                "speck_filter": {"type": "boolean", "default": True},
+                "downsample_mode": {
+                    "type": "string",
+                    "enum": list(VALID_DOWNSAMPLE_MODES),
+                    "default": "mode",
+                },
+                "align_mode": {
+                    "type": "string",
+                    "enum": list(VALID_ALIGN_MODES),
+                    "default": "centroid",
+                },
                 "output_dir": {"type": "string"},
                 "use_cache": {"type": "boolean", "default": True},
                 "use_llm": {"type": "boolean", "default": True},
@@ -226,6 +315,8 @@ def _tool_build_pixel_prompt(args: dict[str, Any], cfg: AppConfig) -> dict[str, 
     style = str(args.get("style") or cfg.default_style or DEFAULT_STYLE)
     has_ref = bool(args.get("has_ref", False))
     use_llm = bool(args.get("use_llm", False))
+    bg_color = str(args["bg_color"]) if args.get("bg_color") else None
+    action_notes = str(args["action_notes"]) if args.get("action_notes") else None
 
     res = optimize_prompt(
         user_prompt=prompt_text,
@@ -237,6 +328,8 @@ def _tool_build_pixel_prompt(args: dict[str, Any], cfg: AppConfig) -> dict[str, 
         has_ref=has_ref,
         config=cfg,
         use_llm=use_llm,
+        bg_color=bg_color,
+        action_notes=action_notes,
     )
     gen_size = choose_generation_size(
         target_size=target_size,
@@ -287,6 +380,11 @@ def _tool_process_image_to_aseprite(args: dict[str, Any], cfg: AppConfig) -> dic
     output_dir = _resolve_path(args.get("output_dir"), cfg.output_dir)
     cache_dir = _resolve_path(None, cfg.cache_dir)
     skip_aseprite = bool(args.get("skip_aseprite", False))
+    bg_tolerance = int(args.get("bg_tolerance", 28))
+    despill = bool(args.get("despill", True))
+    speck_filter = bool(args.get("speck_filter", True))
+    downsample_mode = str(args.get("downsample_mode", "mode"))
+    align_mode = str(args.get("align_mode", "centroid"))
 
     with Image.open(raw_path) as raw_img:
         processed_img, proc_meta = process_asset(
@@ -297,6 +395,11 @@ def _tool_process_image_to_aseprite(args: dict[str, Any], cfg: AppConfig) -> dic
             cols=cols if asset_type == "anim" else None,
             palette=palette_colors,
             max_colors=effective_max_colors,
+            bg_tolerance=bg_tolerance,
+            despill=despill,
+            speck_filter=speck_filter,
+            downsample_mode=downsample_mode,
+            align_mode=align_mode,
         )
 
     pkg = _package_processed_image(
@@ -320,6 +423,87 @@ def _tool_process_image_to_aseprite(args: dict[str, Any], cfg: AppConfig) -> dic
             "cols": proc_meta["cols"],
             "rows": proc_meta["rows"],
             "frames": proc_meta["frames"],
+        }
+    )
+    return pkg
+
+
+def _tool_create_idle_animation(args: dict[str, Any], cfg: AppConfig) -> dict[str, Any]:
+    raw_arg = str(args.get("raw_image_path", "")).strip()
+    if not raw_arg:
+        raise ValueError("'raw_image_path' is required.")
+    raw_path = _resolve_path(raw_arg, REPO_ROOT)
+    if not raw_path.is_file():
+        raise FileNotFoundError(f"Raw image not found: {raw_path}")
+
+    target_size = parse_size(str(args.get("size", "48x48")))
+    frames = int(args.get("frames", 6))
+    cols_arg = args.get("cols")
+    cols, rows = compute_grid(frames, int(cols_arg) if cols_arg is not None else None)
+    fps = float(args.get("fps", 6.0))
+    idle_style = str(args.get("idle_style", "bob"))
+    bob_px = int(args.get("bob_px", 1))
+    style = str(args.get("style") or cfg.default_style or DEFAULT_STYLE)
+
+    palette_arg = args.get("palette")
+    palette_colors = parse_palette(str(palette_arg)) if palette_arg else None
+    max_colors_arg = args.get("max_colors")
+    effective_max_colors = resolve_max_colors(
+        style=style,
+        has_palette=palette_colors is not None,
+        cli_max_colors=int(max_colors_arg) if max_colors_arg is not None else None,
+    )
+
+    name_arg = str(args.get("name", "")).strip()
+    stem = name_arg or f"idle_{slugify_name(raw_path.stem)}"
+    output_dir = _resolve_path(args.get("output_dir"), cfg.output_dir)
+    cache_dir = _resolve_path(None, cfg.cache_dir)
+    skip_aseprite = bool(args.get("skip_aseprite", False))
+
+    bg_tolerance = int(args.get("bg_tolerance", 28))
+    despill = bool(args.get("despill", True))
+    speck_filter = bool(args.get("speck_filter", True))
+    downsample_mode = str(args.get("downsample_mode", "mode"))
+
+    with Image.open(raw_path) as raw_img:
+        sheet, _ = process_idle_from_single(
+            img=raw_img,
+            target_size=target_size,
+            frames=frames,
+            cols=cols,
+            bob_px=bob_px,
+            idle_style=idle_style,
+            palette=palette_colors,
+            max_colors=effective_max_colors,
+            bg_tolerance=bg_tolerance,
+            despill=despill,
+            speck_filter=speck_filter,
+            downsample_mode=downsample_mode,
+        )
+
+    pkg = _package_processed_image(
+        processed_img=sheet,
+        stem=stem,
+        asset_type="anim",
+        target_size=target_size,
+        frames=frames,
+        cols=cols,
+        fps=fps,
+        output_dir=output_dir,
+        cache_dir=cache_dir,
+        cfg=cfg,
+        skip_aseprite=skip_aseprite,
+    )
+    pkg.update(
+        {
+            "asset_type": "anim",
+            "idle_style": idle_style,
+            "bob_px": bob_px,
+            "target_size": f"{target_size[0]}x{target_size[1]}",
+            "sheet_size": f"{sheet.size[0]}x{sheet.size[1]}",
+            "cols": cols,
+            "rows": rows,
+            "frames": frames,
         }
     )
     return pkg
@@ -358,6 +542,14 @@ def _tool_generate_game_asset(args: dict[str, Any], cfg: AppConfig) -> dict[str,
     name_arg = str(args.get("name", "")).strip()
     stem = name_arg or f"{asset_type}_{slugify_name(prompt_text)}"
 
+    bg_color = str(args["bg_color"]) if args.get("bg_color") else None
+    action_notes = str(args["action_notes"]) if args.get("action_notes") else None
+    bg_tolerance = int(args.get("bg_tolerance", 28))
+    despill = bool(args.get("despill", True))
+    speck_filter = bool(args.get("speck_filter", True))
+    downsample_mode = str(args.get("downsample_mode", "mode"))
+    align_mode = str(args.get("align_mode", "centroid"))
+
     prompt_res = optimize_prompt(
         user_prompt=prompt_text,
         asset_type=asset_type,
@@ -368,6 +560,8 @@ def _tool_generate_game_asset(args: dict[str, Any], cfg: AppConfig) -> dict[str,
         has_ref=ref_path is not None,
         config=cfg,
         use_llm=bool(args.get("use_llm", True)),
+        bg_color=bg_color,
+        action_notes=action_notes,
     )
 
     provider = create_provider(cfg)
@@ -391,6 +585,11 @@ def _tool_generate_game_asset(args: dict[str, Any], cfg: AppConfig) -> dict[str,
             cols=cols if asset_type == "anim" else None,
             palette=palette_colors,
             max_colors=effective_max_colors,
+            bg_tolerance=bg_tolerance,
+            despill=despill,
+            speck_filter=speck_filter,
+            downsample_mode=downsample_mode,
+            align_mode=align_mode,
         )
 
     pkg = _package_processed_image(
@@ -452,6 +651,7 @@ def call_tool(
     handlers = {
         "build_pixel_prompt": _tool_build_pixel_prompt,
         "process_image_to_aseprite": _tool_process_image_to_aseprite,
+        "create_idle_animation": _tool_create_idle_animation,
         "generate_game_asset": _tool_generate_game_asset,
         "check_aseprite_status": _tool_check_aseprite_status,
     }

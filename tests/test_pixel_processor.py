@@ -10,13 +10,17 @@ import numpy as np
 from PIL import Image
 
 from src.pixel_processor import (
+    filter_small_components,
+    generate_idle_frames,
     parse_palette,
     parse_size,
     process_anim,
+    process_idle_from_single,
     process_item,
     process_tile,
     quantize_image,
     remove_background,
+    resize_pixel_art,
 )
 
 
@@ -139,6 +143,121 @@ class PixelProcessorTests(unittest.TestCase):
         np.testing.assert_array_equal(t_arr[0, :, :3], t_arr[-1, :, :3])
         unique_colors = np.unique(t_arr[:, :, :3].reshape(-1, 3), axis=0)
         self.assertLessEqual(len(unique_colors), 8)
+
+    def test_filter_small_components_removes_corner_speck_and_keeps_sprite(self) -> None:
+        arr = np.zeros((200, 200, 4), dtype=np.uint8)
+        arr[40:120, 70:130] = [100, 150, 220, 255]  # 60x80 main character
+        arr[196:198, 195:198] = [10, 20, 10, 255]    # 3x2 corner speck
+        cleaned = filter_small_components(Image.fromarray(arr, mode="RGBA"))
+        bbox = cleaned.getbbox()
+        self.assertEqual(bbox, (70, 40, 130, 120))
+
+    def test_remove_background_despills_chroma_fringe(self) -> None:
+        arr = np.full((64, 64, 4), [0, 255, 0, 255], dtype=np.uint8)
+        # Draw sprite core + 1px dark outline + 1px green-blended JPEG halo
+        arr[20:44, 20:44] = [20, 180, 20, 255]  # green halo ring
+        arr[21:43, 21:43] = [15, 15, 25, 255]   # dark outline
+        arr[23:41, 23:41] = [220, 220, 230, 255]  # white hair/body interior
+        cleaned = remove_background(Image.fromarray(arr, mode="RGBA"), tolerance=28, despill=True)
+        out = np.array(cleaned)
+        # Green-blended halo ring should be removed
+        self.assertEqual(out[20, 20, 3], 0)
+        # Outline and interior remain opaque and unharmed
+        self.assertEqual(out[21, 21, 3], 255)
+        self.assertEqual(out[32, 32, 3], 255)
+        self.assertEqual(tuple(out[32, 32, :3]), (220, 220, 230))
+
+    def test_resize_pixel_art_mode_preserves_crisp_blocks_over_nearest(self) -> None:
+        # 10x10 grid of 10x10px blocks (100x100), with 1px noisy border on each block edge
+        arr = np.zeros((100, 100, 4), dtype=np.uint8)
+        for by in range(10):
+            for bx in range(10):
+                color = [20 + bx * 20, 30 + by * 20, 180, 255]
+                y0, y1 = by * 10, (by + 1) * 10
+                x0, x1 = bx * 10, (bx + 1) * 10
+                arr[y0:y1, x0:x1] = [0, 0, 0, 255]  # 1px noisy border around block
+                arr[y0 + 1 : y1 - 1, x0 + 1 : x1 - 1] = color
+        down = resize_pixel_art(Image.fromarray(arr, mode="RGBA"), (10, 10), mode="mode")
+        d_arr = np.array(down)
+        for by in range(10):
+            for bx in range(10):
+                expected = (20 + bx * 20, 30 + by * 20, 180, 255)
+                self.assertEqual(tuple(map(int, d_arr[by, bx])), expected)
+
+    def test_process_anim_centroid_alignment_prevents_horizontal_jitter_and_corner_speck_shift(self) -> None:
+        # 2x1 grid (each cell 100x100 -> 200x100) on #00FF00 background
+        arr = np.full((100, 200, 4), [0, 255, 0, 255], dtype=np.uint8)
+        # Frame 0: centered character body (x=35..65, y=20..85)
+        arr[20:85, 35:65] = [60, 120, 220, 255]
+        # Frame 1: same body shifted + 4px side cape tip on right + 2x2 corner speck at bottom-right
+        arr[20:85, 135:165] = [60, 120, 220, 255]
+        arr[55:70, 165:175] = [60, 120, 220, 255]
+        arr[97:99, 197:199] = [10, 40, 10, 255]  # corner speck that previously broke frame 2
+
+        sheet, frames = process_anim(
+            Image.fromarray(arr, mode="RGBA"),
+            target_size=(32, 32),
+            frames=2,
+            cols=2,
+            max_colors=8,
+            downsample_mode="mode",
+            align_mode="centroid",
+        )
+        self.assertEqual(sheet.size, (64, 32))
+        b0 = frames[0].getbbox()
+        b1 = frames[1].getbbox()
+        assert b0 is not None and b1 is not None
+        # Bottom feet alignment must match within 1px (no vertical jump from corner speck)
+        self.assertLessEqual(abs(b0[3] - b1[3]), 1)
+
+    def test_generate_idle_frames_and_process_idle_from_single(self) -> None:
+        # Create a 96x96 raw character sprite on neutral gray #D0D0D0
+        arr = np.full((96, 96, 4), [208, 208, 208, 255], dtype=np.uint8)
+        arr[16:46, 30:66] = [240, 240, 245, 255]  # head/hair
+        arr[46:72, 26:70] = [30, 110, 200, 255]   # cloak torso
+        arr[72:84, 34:44] = [70, 50, 40, 255]     # left boot
+        arr[72:84, 52:62] = [70, 50, 40, 255]     # right boot
+        raw = Image.fromarray(arr, mode="RGBA")
+
+        for idle_style in ("bob", "breathe", "float"):
+            sheet, frames = process_idle_from_single(
+                raw,
+                target_size=(32, 32),
+                frames=6,
+                cols=3,
+                bob_px=1,
+                idle_style=idle_style,
+                max_colors=8,
+            )
+            self.assertEqual(sheet.size, (96, 64))
+            self.assertEqual(len(frames), 6)
+            base_colors = {
+                tuple(map(int, c))
+                for c in np.unique(
+                    np.array(frames[0])[np.array(frames[0])[:, :, 3] == 255, :3],
+                    axis=0,
+                )
+            }
+            # Frames must not invent new colors and must actually animate (not all identical)
+            diffs = 0
+            for fr in frames:
+                f_arr = np.array(fr)
+                f_colors = {
+                    tuple(map(int, c))
+                    for c in np.unique(f_arr[f_arr[:, :, 3] == 255, :3], axis=0)
+                }
+                self.assertTrue(f_colors.issubset(base_colors))
+                if not np.array_equal(f_arr, np.array(frames[0])):
+                    diffs += 1
+            self.assertGreater(diffs, 0, msg=f"idle_style={idle_style} produced static frames")
+            if idle_style in ("bob", "breathe"):
+                # Feet row (bottom-most opaque row of frame 0) must stay grounded in all frames
+                b0 = frames[0].getbbox()
+                assert b0 is not None
+                for fr in frames:
+                    b = fr.getbbox()
+                    assert b is not None
+                    self.assertEqual(b[3], b0[3])
 
 
 if __name__ == "__main__":

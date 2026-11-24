@@ -168,6 +168,46 @@ class CliAndConfigTests(unittest.TestCase):
                 )
             self.assertEqual(rc, 2)
 
+    def test_cli_idle_from_single_skip_aseprite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_path = root / "single_char.png"
+            raw_path.write_bytes(_make_sample_png_bytes((96, 96)))
+            out_dir = root / "output"
+            cache_dir = root / "cache"
+
+            rc = main(
+                [
+                    "--prompt",
+                    "female mage",
+                    "--idle-from-single",
+                    "--idle-style",
+                    "bob",
+                    "--bob-px",
+                    "1",
+                    "--size",
+                    "32x32",
+                    "--frames",
+                    "6",
+                    "--cols",
+                    "3",
+                    "--raw-image",
+                    str(raw_path),
+                    "--output-dir",
+                    str(out_dir),
+                    "--cache-dir",
+                    str(cache_dir),
+                    "--name",
+                    "mage_idle",
+                    "--skip-aseprite",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            out_png = out_dir / "mage_idle.png"
+            self.assertTrue(out_png.is_file())
+            with Image.open(out_png) as img:
+                self.assertEqual(img.size, (96, 64))
+
 
 if __name__ == "__main__":
     unittest.main()

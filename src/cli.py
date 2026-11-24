@@ -20,7 +20,15 @@ from src.image_gen import (
     choose_generation_size,
     create_provider,
 )
-from src.pixel_processor import parse_palette, parse_size, process_asset
+from src.pixel_processor import (
+    VALID_ALIGN_MODES,
+    VALID_DOWNSAMPLE_MODES,
+    VALID_IDLE_STYLES,
+    parse_palette,
+    parse_size,
+    process_asset,
+    process_idle_from_single,
+)
 from src.prompt_optimizer import DEFAULT_STYLE, VALID_ASSET_TYPES, compute_grid, optimize_prompt
 
 
@@ -126,6 +134,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save processed PNG without invoking Aseprite CLI.",
     )
     parser.add_argument(
+        "--bg-tolerance",
+        type=int,
+        default=28,
+        help="Color distance tolerance for exterior background removal (default: 28).",
+    )
+    parser.add_argument(
+        "--downsample-mode",
+        choices=VALID_DOWNSAMPLE_MODES,
+        default="mode",
+        help="Pixel-art downscaling method: mode | nearest | box (default: mode).",
+    )
+    parser.add_argument(
+        "--align-mode",
+        choices=VALID_ALIGN_MODES,
+        default="centroid",
+        help="Horizontal alignment for anim frames: centroid | center (default: centroid).",
+    )
+    parser.add_argument(
+        "--no-despill",
+        action="store_true",
+        help="Disable border chroma despill after background removal.",
+    )
+    parser.add_argument(
+        "--no-speck-filter",
+        action="store_true",
+        help="Disable connected-component small-speck filtering.",
+    )
+    parser.add_argument(
+        "--idle-from-single",
+        action="store_true",
+        help="Generate a consistent multi-frame idle spritesheet from a single character image.",
+    )
+    parser.add_argument(
+        "--idle-style",
+        choices=VALID_IDLE_STYLES,
+        default="bob",
+        help="Procedural idle motion style when --idle-from-single is set: bob | breathe | float (default: bob).",
+    )
+    parser.add_argument(
+        "--bob-px",
+        type=int,
+        default=1,
+        help="Vertical bob amplitude in pixels for --idle-from-single (default: 1).",
+    )
+    parser.add_argument(
         "--config",
         default=None,
         help="Optional path to JSON configuration file.",
@@ -138,13 +191,15 @@ def resolve_max_colors(
     has_palette: bool,
     cli_max_colors: int | None,
 ) -> int | None:
-    """Resolve effective max-colors setting respecting --palette and 8bit-topdown default."""
+    """Resolve effective max-colors setting respecting --palette and style defaults."""
     if has_palette:
         return None
     if cli_max_colors is not None:
         return None if cli_max_colors <= 0 else cli_max_colors
     if style == DEFAULT_STYLE:
         return 16
+    if style in ("16bit-topdown", "anime-rpg-topdown"):
+        return 32
     return None
 
 
@@ -154,7 +209,11 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
     style = args.style or cfg.default_style or DEFAULT_STYLE
     target_size = parse_size(args.size)
 
-    if args.asset_type == "anim":
+    idle_from_single = bool(getattr(args, "idle_from_single", False))
+    effective_asset_type = "anim" if idle_from_single else args.asset_type
+    prompt_asset_type = "item" if idle_from_single else args.asset_type
+
+    if effective_asset_type == "anim":
         cols, rows = compute_grid(args.frames, args.cols)
     else:
         cols, rows = 1, 1
@@ -178,15 +237,15 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    stem = args.name.strip() if args.name else f"{args.asset_type}_{slugify_name(args.prompt)}"
+    stem = args.name.strip() if args.name else f"{effective_asset_type}_{slugify_name(args.prompt)}"
 
     # 1. Prompt Optimization (minimal/zero LLM tokens)
     prompt_res = optimize_prompt(
         user_prompt=args.prompt,
-        asset_type=args.asset_type,
+        asset_type=prompt_asset_type,
         size=target_size,
         frames=args.frames,
-        cols=cols if args.asset_type == "anim" else None,
+        cols=cols if prompt_asset_type == "anim" else None,
         style=style,
         has_ref=ref_path is not None,
         config=cfg,
@@ -212,9 +271,9 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
             )
             gen_size = choose_generation_size(
                 target_size=target_size,
-                asset_type=args.asset_type,
-                cols=cols,
-                rows=rows,
+                asset_type=prompt_asset_type,
+                cols=1 if idle_from_single else cols,
+                rows=1 if idle_from_single else rows,
             )
             gen_res = client.generate_or_load(
                 prompt=prompt_res.final_prompt,
@@ -222,7 +281,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
                 target_size=target_size,
                 ref_path=ref_path,
                 use_cache=not args.no_cache,
-                extra_meta={"asset_type": args.asset_type, "style": style},
+                extra_meta={"asset_type": effective_asset_type, "style": style},
             )
             raw_bytes = gen_res.image_bytes
             source_label = "cache hit" if gen_res.from_cache else f"generated via {gen_res.provider}"
@@ -232,16 +291,49 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
             return 2
 
     # 3. Deterministic Pixel & Spritesheet Processing
+    bg_tolerance = int(getattr(args, "bg_tolerance", 28))
+    despill = not bool(getattr(args, "no_despill", False))
+    speck_filter = not bool(getattr(args, "no_speck_filter", False))
+    downsample_mode = str(getattr(args, "downsample_mode", "mode"))
+    align_mode = str(getattr(args, "align_mode", "centroid"))
+
     with Image.open(io.BytesIO(raw_bytes)) as raw_img:
-        processed_img, proc_meta = process_asset(
-            img=raw_img,
-            asset_type=args.asset_type,
-            target_size=target_size,
-            frames=args.frames,
-            cols=cols if args.asset_type == "anim" else None,
-            palette=palette_colors,
-            max_colors=effective_max_colors,
-        )
+        if idle_from_single:
+            processed_img, _ = process_idle_from_single(
+                img=raw_img,
+                target_size=target_size,
+                frames=args.frames,
+                cols=cols,
+                bob_px=int(getattr(args, "bob_px", 1)),
+                idle_style=str(getattr(args, "idle_style", "bob")),
+                palette=palette_colors,
+                max_colors=effective_max_colors,
+                bg_tolerance=bg_tolerance,
+                despill=despill,
+                speck_filter=speck_filter,
+                downsample_mode=downsample_mode,
+            )
+            proc_meta = {
+                "cols": cols,
+                "rows": rows,
+                "frames": args.frames,
+                "sheet_size": processed_img.size,
+            }
+        else:
+            processed_img, proc_meta = process_asset(
+                img=raw_img,
+                asset_type=args.asset_type,
+                target_size=target_size,
+                frames=args.frames,
+                cols=cols if args.asset_type == "anim" else None,
+                palette=palette_colors,
+                max_colors=effective_max_colors,
+                bg_tolerance=bg_tolerance,
+                despill=despill,
+                speck_filter=speck_filter,
+                downsample_mode=downsample_mode,
+                align_mode=align_mode,
+            )
 
     staged_png = cache_dir / f"{stem}_processed.png"
     out_png = output_dir / f"{stem}.png"
@@ -266,9 +358,9 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
             input_png=staged_png,
             out_aseprite=out_aseprite,
             out_png=out_png,
-            asset_type=args.asset_type,
+            asset_type=effective_asset_type,
             frame_size=target_size,
-            frames=args.frames if args.asset_type == "anim" else 1,
+            frames=args.frames if effective_asset_type == "anim" else 1,
             cols=cols,
             fps=args.fps,
             configured_aseprite_path=cfg.aseprite_path or None,

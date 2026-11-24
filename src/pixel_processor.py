@@ -12,6 +12,9 @@ import numpy as np
 from PIL import Image
 
 HEX_COLOR_RE = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+VALID_DOWNSAMPLE_MODES = ("mode", "nearest", "box")
+VALID_ALIGN_MODES = ("centroid", "center")
+VALID_IDLE_STYLES = ("bob", "breathe", "float")
 
 
 def parse_size(size_str: str) -> tuple[int, int]:
@@ -111,8 +114,21 @@ def _detect_border_color(arr: np.ndarray) -> np.ndarray:
     return np.median(border_pixels[mask], axis=0).astype(np.float32)
 
 
-def remove_background(img: Image.Image, tolerance: int = 28) -> Image.Image:
-    """Remove exterior background using border-connected flood fill while preserving interior colors."""
+def _neighbors_4(mask: np.ndarray) -> np.ndarray:
+    """Return boolean mask of pixels 4-adjacent to True cells in `mask` (excluding `mask` itself)."""
+    h, w = mask.shape
+    adj = np.zeros_like(mask, dtype=bool)
+    if h > 1:
+        adj[1:, :] |= mask[:-1, :]
+        adj[:-1, :] |= mask[1:, :]
+    if w > 1:
+        adj[:, 1:] |= mask[:, :-1]
+        adj[:, :-1] |= mask[:, 1:]
+    return adj & (~mask)
+
+
+def remove_background(img: Image.Image, tolerance: int = 28, despill: bool = True) -> Image.Image:
+    """Remove exterior background using border-connected flood fill and optional border halo despill."""
     rgba = img.convert("RGBA")
     arr = np.array(rgba, dtype=np.uint8)
     h, w, _ = arr.shape
@@ -165,7 +181,200 @@ def remove_background(img: Image.Image, tolerance: int = 28) -> Image.Image:
     out = arr.copy()
     out[visited, 3] = 0
     out[visited, :3] = 0
+
+    if despill and np.any(visited):
+        bg_sat = float(np.max(bg_rgb) - np.min(bg_rgb))
+        ring1 = _neighbors_4(visited)
+        if bg_sat >= 100.0:
+            # Chroma-key backdrop (e.g. #00FF00, #FF00FF): trim anti-aliased fringe & despill 2px border
+            fringe_tol = max(float(tolerance) * 1.8, 52.0)
+            erase1 = ring1 & (dist <= fringe_tol)
+            if np.any(erase1):
+                visited |= erase1
+                out[erase1, 3] = 0
+                out[erase1, :3] = 0
+                ring1 = _neighbors_4(visited)
+
+            ring2 = ring1 | _neighbors_4(visited | ring1)
+            if np.any(ring2):
+                bg_chroma = bg_rgb - float(np.mean(bg_rgb))
+                bg_norm_sq = float(np.dot(bg_chroma, bg_chroma)) + 1e-6
+                p_chroma = rgb - np.mean(rgb, axis=2, keepdims=True)
+                spill = np.sum(p_chroma * bg_chroma, axis=2) / bg_norm_sq
+
+                spill_erase = ring1 & (spill > 0.55)
+                if np.any(spill_erase):
+                    out[spill_erase, 3] = 0
+                    out[spill_erase, :3] = 0
+
+                despill_mask = ring2 & (~spill_erase) & (spill > 0.25)
+                if np.any(despill_mask):
+                    corrected = rgb[despill_mask] - spill[despill_mask, None] * bg_chroma[None, :]
+                    out[despill_mask, :3] = np.clip(np.round(corrected), 0, 255).astype(np.uint8)
+        else:
+            # Neutral backdrop (e.g. #D0D0D0, white, black): conservative 1px trim only
+            erase1 = ring1 & (dist <= float(tolerance) * 1.35)
+            if np.any(erase1):
+                out[erase1, 3] = 0
+                out[erase1, :3] = 0
+
     return Image.fromarray(out, mode="RGBA")
+
+
+def filter_small_components(
+    img: Image.Image,
+    min_area_ratio: float = 0.005,
+    min_pixels: int = 4,
+) -> Image.Image:
+    """Remove tiny disconnected foreground specks/watermarks while always keeping the main sprite."""
+    rgba = img.convert("RGBA")
+    arr = np.array(rgba, dtype=np.uint8)
+    mask = arr[:, :, 3] >= 128
+    h, w = mask.shape
+    if h == 0 or w == 0 or not np.any(mask):
+        return rgba
+
+    # Scanline run-length encoding + Union-Find (8-connected)
+    runs: list[tuple[int, int, int]] = []  # (y, x0, x1_excl)
+    parent: list[int] = []
+    run_len: list[int] = []
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            if ra < rb:
+                parent[rb] = ra
+            else:
+                parent[ra] = rb
+
+    prev_row_runs: list[tuple[int, int, int]] = []  # (x0, x1_excl, run_idx)
+    for y in range(h):
+        row = mask[y]
+        curr_row_runs: list[tuple[int, int, int]] = []
+        if np.any(row):
+            padded = np.empty(w + 2, dtype=np.uint8)
+            padded[0] = 0
+            padded[1:-1] = row
+            padded[-1] = 0
+            diffs = np.diff(padded.astype(np.int8))
+            starts = np.flatnonzero(diffs == 1)
+            ends = np.flatnonzero(diffs == -1)
+
+            p_idx = 0
+            n_prev = len(prev_row_runs)
+            for s, e in zip(starts.tolist(), ends.tolist()):
+                r_idx = len(runs)
+                runs.append((y, s, e))
+                parent.append(r_idx)
+                run_len.append(e - s)
+                curr_row_runs.append((s, e, r_idx))
+
+                while p_idx < n_prev and prev_row_runs[p_idx][1] < s:
+                    p_idx += 1
+                scan = p_idx
+                while scan < n_prev and prev_row_runs[scan][0] <= e:
+                    if prev_row_runs[scan][1] >= s:
+                        union(r_idx, prev_row_runs[scan][2])
+                    scan += 1
+        prev_row_runs = curr_row_runs
+
+    if len(runs) <= 1:
+        return rgba
+
+    comp_areas: dict[int, int] = {}
+    roots = [find(i) for i in range(len(runs))]
+    for r_idx, root in enumerate(roots):
+        comp_areas[root] = comp_areas.get(root, 0) + run_len[r_idx]
+
+    if len(comp_areas) <= 1:
+        return rgba
+
+    max_area = max(comp_areas.values())
+    threshold = max(int(min_pixels), int(round(max_area * float(min_area_ratio))))
+    keep_roots = {root for root, area in comp_areas.items() if area == max_area or area >= threshold}
+    if len(keep_roots) == len(comp_areas):
+        return rgba
+
+    out = arr.copy()
+    for (y, x0, x1), root in zip(runs, roots):
+        if root not in keep_roots:
+            out[y, x0:x1] = 0
+    return Image.fromarray(out, mode="RGBA")
+
+
+def resize_pixel_art(
+    img: Image.Image,
+    size: tuple[int, int],
+    mode: str = "mode",
+) -> Image.Image:
+    """Resize sprite using pixel-art-aware majority-vote ('mode'), 'nearest', or 'box'."""
+    if mode not in VALID_DOWNSAMPLE_MODES:
+        raise ValueError(f"Unsupported downsample mode '{mode}'. Expected one of {VALID_DOWNSAMPLE_MODES}.")
+    tw, th = size
+    rgba = img.convert("RGBA")
+    sw, sh = rgba.size
+    if mode == "nearest" or (tw >= sw and th >= sh):
+        return rgba.resize((tw, th), resample=Image.Resampling.NEAREST)
+    if mode == "box":
+        return rgba.resize((tw, th), resample=Image.Resampling.BOX)
+
+    arr = np.array(rgba, dtype=np.uint8)
+    xs = np.round(np.linspace(0, sw, tw + 1)).astype(int)
+    ys = np.round(np.linspace(0, sh, th + 1)).astype(int)
+    out = np.zeros((th, tw, 4), dtype=np.uint8)
+
+    for oy in range(th):
+        y0 = int(ys[oy])
+        y1 = max(y0 + 1, int(ys[oy + 1]))
+        bh = y1 - y0
+        for ox in range(tw):
+            x0 = int(xs[ox])
+            x1 = max(x0 + 1, int(xs[ox + 1]))
+            bw = x1 - x0
+            block = arr[y0:y1, x0:x1]
+            opaque_mask = block[:, :, 3] >= 128
+            opaque_ratio = float(np.mean(opaque_mask))
+            if opaque_ratio < 0.42:
+                continue
+
+            pts: np.ndarray | None = None
+            if opaque_ratio >= 0.85 and bh >= 6 and bw >= 6:
+                iy0 = bh // 6
+                iy1 = bh - iy0
+                ix0 = bw // 6
+                ix1 = bw - ix0
+                inner = block[iy0:iy1, ix0:ix1]
+                inner_mask = inner[:, :, 3] >= 128
+                if np.any(inner_mask):
+                    pts = inner[inner_mask, :3]
+
+            if pts is None:
+                pts = block[opaque_mask, :3]
+
+            b = (pts // 16).astype(np.int32)
+            packed = (b[:, 0] << 16) | (b[:, 1] << 8) | b[:, 2]
+            unique_vals, counts = np.unique(packed, return_counts=True)
+            dominant = unique_vals[int(np.argmax(counts))]
+            out[oy, ox, :3] = np.median(pts[packed == dominant], axis=0).astype(np.uint8)
+            out[oy, ox, 3] = 255
+
+    return Image.fromarray(out, mode="RGBA")
+
+
+def _opaque_centroid_x(img: Image.Image) -> float:
+    arr = np.array(img.convert("RGBA"), dtype=np.uint8)
+    xs = np.flatnonzero(np.any(arr[:, :, 3] >= 128, axis=0))
+    if len(xs) == 0:
+        return img.size[0] / 2.0
+    # Weighted horizontal centroid of opaque pixels
+    _, col_xs = np.where(arr[:, :, 3] >= 128)
+    return float(np.mean(col_xs)) + 0.5
 
 
 def quantize_image(
@@ -224,9 +433,14 @@ def process_item(
     max_colors: int | None = 16,
     pad: int = 1,
     bg_tolerance: int = 28,
+    despill: bool = True,
+    speck_filter: bool = True,
+    downsample_mode: str = "mode",
 ) -> Image.Image:
-    """Remove background, crop tightly, NEAREST-resize into centered canvas, and quantize."""
-    cleaned = remove_background(img, tolerance=bg_tolerance)
+    """Remove background, filter specks, crop tightly, pixel-resize into centered canvas, and quantize."""
+    cleaned = remove_background(img, tolerance=bg_tolerance, despill=despill)
+    if speck_filter:
+        cleaned = filter_small_components(cleaned)
     bbox = cleaned.getbbox()
     if bbox is None:
         return Image.new("RGBA", target_size, (0, 0, 0, 0))
@@ -238,7 +452,7 @@ def process_item(
     new_w = max(1, min(inner_w, int(round(cw * scale))))
     new_h = max(1, min(inner_h, int(round(ch * scale))))
 
-    resized = cropped.resize((new_w, new_h), resample=Image.Resampling.NEAREST)
+    resized = resize_pixel_art(cropped, (new_w, new_h), mode=downsample_mode)
     canvas = Image.new("RGBA", target_size, (0, 0, 0, 0))
     paste_x = (target_size[0] - new_w) // 2
     paste_y = (target_size[1] - new_h) // 2
@@ -255,12 +469,18 @@ def process_anim(
     max_colors: int | None = 16,
     pad: int = 1,
     bg_tolerance: int = 28,
+    despill: bool = True,
+    speck_filter: bool = True,
+    downsample_mode: str = "mode",
+    align_mode: str = "centroid",
 ) -> tuple[Image.Image, list[Image.Image]]:
-    """Slice spritesheet grid, scale frames consistently via NEAREST, stitch, and quantize uniformly."""
+    """Slice spritesheet grid, scale frames consistently, align, stitch, and quantize uniformly."""
     if frames < 1:
         raise ValueError(f"frames must be >= 1, got {frames}")
     if cols < 1:
         raise ValueError(f"cols must be >= 1, got {cols}")
+    if align_mode not in VALID_ALIGN_MODES:
+        raise ValueError(f"Unsupported align_mode '{align_mode}'. Expected one of {VALID_ALIGN_MODES}.")
 
     rows = math.ceil(frames / cols)
     tw, th = target_size
@@ -279,7 +499,9 @@ def process_anim(
         y0 = round(row * src_h / rows)
         y1 = round((row + 1) * src_h / rows)
         cell = rgba.crop((x0, y0, max(x0 + 1, x1), max(y0 + 1, y1)))
-        cleaned = remove_background(cell, tolerance=bg_tolerance)
+        cleaned = remove_background(cell, tolerance=bg_tolerance, despill=despill)
+        if speck_filter:
+            cleaned = filter_small_components(cleaned)
         bbox = cleaned.getbbox()
         if bbox is None:
             cropped_frames.append(None)
@@ -305,11 +527,16 @@ def process_anim(
         cw, ch = cropped.size
         new_w = max(1, min(inner_w, int(round(cw * shared_scale))))
         new_h = max(1, min(inner_h, int(round(ch * shared_scale))))
-        resized = cropped.resize((new_w, new_h), resample=Image.Resampling.NEAREST)
+        resized = resize_pixel_art(cropped, (new_w, new_h), mode=downsample_mode)
 
         col = idx % cols
         row = idx // cols
-        cell_x = col * tw + (tw - new_w) // 2
+        if align_mode == "centroid":
+            cx = _opaque_centroid_x(resized)
+            local_x = max(0, min(tw - new_w, int(round((tw / 2.0) - cx))))
+        else:
+            local_x = (tw - new_w) // 2
+        cell_x = col * tw + local_x
         cell_y = row * th + max(0, anchor_bottom_y - new_h)
         sheet.paste(resized, (cell_x, cell_y), resized)
 
@@ -331,10 +558,11 @@ def process_tile(
     palette: list[tuple[int, int, int]] | None = None,
     max_colors: int | None = 16,
     seam_blend: int = 2,
+    downsample_mode: str = "mode",
 ) -> Image.Image:
-    """NEAREST-resize tile, blend opposing borders toroidally to reduce tile seams, and quantize."""
+    """Pixel-resize tile, blend opposing borders toroidally to reduce tile seams, and quantize."""
     tw, th = target_size
-    resized = img.convert("RGBA").resize((tw, th), resample=Image.Resampling.NEAREST)
+    resized = resize_pixel_art(img, (tw, th), mode=downsample_mode)
     arr = np.array(resized, dtype=np.float32)
 
     blend_x = min(seam_blend, tw // 4) if seam_blend > 0 else 0
@@ -360,6 +588,160 @@ def process_tile(
     return quantize_image(blended, palette=palette, max_colors=max_colors)
 
 
+def _paste_rows_shifted(
+    canvas: np.ndarray,
+    base: np.ndarray,
+    src_y0: int,
+    src_y1: int,
+    dy: int,
+) -> None:
+    """Paste rows [src_y0:src_y1) from `base` into `canvas` shifted vertically by `dy`."""
+    h, _, _ = base.shape
+    if src_y1 <= src_y0:
+        return
+    dst_y0 = src_y0 + dy
+    dst_y1 = src_y1 + dy
+    clip_y0 = max(0, dst_y0)
+    clip_y1 = min(h, dst_y1)
+    if clip_y1 <= clip_y0:
+        return
+    s_y0 = src_y0 + (clip_y0 - dst_y0)
+    s_y1 = s_y0 + (clip_y1 - clip_y0)
+    patch = base[s_y0:s_y1]
+    mask = patch[:, :, 3] >= 128
+    dst_slice = canvas[clip_y0:clip_y1]
+    dst_slice[mask] = patch[mask]
+
+
+def generate_idle_frames(
+    sprite: Image.Image,
+    frames: int = 6,
+    bob_px: int = 1,
+    idle_style: str = "bob",
+) -> list[Image.Image]:
+    """Generate deterministic, zero-hallucination idle animation frames from a single base sprite."""
+    if frames < 1:
+        raise ValueError(f"frames must be >= 1, got {frames}")
+    if bob_px < 0:
+        raise ValueError(f"bob_px must be >= 0, got {bob_px}")
+    if idle_style not in VALID_IDLE_STYLES:
+        raise ValueError(f"Unsupported idle_style '{idle_style}'. Expected one of {VALID_IDLE_STYLES}.")
+
+    rgba = sprite.convert("RGBA")
+    bbox = rgba.getbbox()
+    if bbox is None or frames == 1 or bob_px == 0:
+        return [rgba.copy() for _ in range(frames)]
+
+    base = np.array(rgba, dtype=np.uint8)
+    h, w, _ = base.shape
+    _, top_y, _, bot_y_excl = bbox
+    bot_y = bot_y_excl - 1
+    char_h = bot_y - top_y + 1
+
+    feet_y = max(top_y + 1, bot_y - max(2, int(round(char_h * 0.16))))
+    waist_y = max(top_y + 1, top_y + int(round(char_h * 0.52)))
+    waist_y = min(waist_y, feet_y)
+
+    result: list[Image.Image] = []
+    if idle_style == "float":
+        can_up = top_y >= bob_px
+        can_down = (h - 1 - bot_y) >= bob_px
+        for i in range(frames):
+            wave = 0.5 * (1.0 - math.cos(2.0 * math.pi * i / frames))
+            shift = int(round(wave * bob_px))
+            dy = -shift if can_up else (shift if can_down else 0)
+            canvas = np.zeros_like(base)
+            _paste_rows_shifted(canvas, base, 0, h, dy)
+            result.append(Image.fromarray(canvas, mode="RGBA"))
+        return result
+
+    # Grounded 'bob' or 'breathe' with invariant head_dy >= torso_dy >= 0 (never tears seams)
+    if frames == 6 and bob_px == 1:
+        if idle_style == "bob":
+            torso_dys = [0, 0, 1, 1, 0, 0]
+            head_dys = [0, 1, 1, 1, 1, 0]
+        else:
+            torso_dys = [0, 0, 0, 1, 0, 0]
+            head_dys = [0, 0, 1, 1, 1, 0]
+    elif frames == 4 and bob_px == 1:
+        if idle_style == "bob":
+            torso_dys = [0, 0, 1, 0]
+            head_dys = [0, 1, 1, 1]
+        else:
+            torso_dys = [0, 0, 0, 0]
+            head_dys = [0, 1, 1, 0]
+    else:
+        torso_dys = []
+        head_dys = []
+        for i in range(frames):
+            phase = 2.0 * math.pi * i / frames
+            t_torso = 0.5 * (1.0 - math.cos(phase))
+            t_head = 0.5 * (1.0 - math.cos(phase - 0.45))
+            if idle_style == "breathe":
+                t_dy = int(round(t_torso * max(0, bob_px - 1))) if bob_px >= 2 else (1 if t_torso > 0.85 else 0)
+            else:
+                t_dy = int(round(t_torso * bob_px))
+            h_dy = max(t_dy, int(round(t_head * bob_px)))
+            torso_dys.append(t_dy)
+            head_dys.append(h_dy)
+
+    for torso_dy, head_dy in zip(torso_dys, head_dys):
+        canvas = np.zeros_like(base)
+        _paste_rows_shifted(canvas, base, feet_y, h, 0)
+        _paste_rows_shifted(canvas, base, waist_y, feet_y, torso_dy)
+        _paste_rows_shifted(canvas, base, 0, waist_y, head_dy)
+        result.append(Image.fromarray(canvas, mode="RGBA"))
+
+    return result
+
+
+def process_idle_from_single(
+    img: Image.Image,
+    target_size: tuple[int, int],
+    frames: int = 6,
+    cols: int | None = None,
+    bob_px: int = 1,
+    idle_style: str = "bob",
+    palette: list[tuple[int, int, int]] | None = None,
+    max_colors: int | None = 16,
+    pad: int = 1,
+    bg_tolerance: int = 28,
+    despill: bool = True,
+    speck_filter: bool = True,
+    downsample_mode: str = "mode",
+) -> tuple[Image.Image, list[Image.Image]]:
+    """Process a single raw character sprite and expand it into a smooth idle spritesheet."""
+    resolved_cols = frames if cols is None else cols
+    if resolved_cols < 1:
+        raise ValueError(f"cols must be >= 1, got {resolved_cols}")
+    rows = math.ceil(frames / resolved_cols)
+    tw, th = target_size
+
+    base_sprite = process_item(
+        img=img,
+        target_size=target_size,
+        palette=palette,
+        max_colors=max_colors,
+        pad=pad,
+        bg_tolerance=bg_tolerance,
+        despill=despill,
+        speck_filter=speck_filter,
+        downsample_mode=downsample_mode,
+    )
+    frame_images = generate_idle_frames(
+        base_sprite,
+        frames=frames,
+        bob_px=bob_px,
+        idle_style=idle_style,
+    )
+    sheet = Image.new("RGBA", (resolved_cols * tw, rows * th), (0, 0, 0, 0))
+    for idx, frame_img in enumerate(frame_images):
+        col = idx % resolved_cols
+        row = idx // resolved_cols
+        sheet.paste(frame_img, (col * tw, row * th), frame_img)
+    return sheet, frame_images
+
+
 def process_asset(
     img: Image.Image,
     asset_type: str,
@@ -369,6 +751,10 @@ def process_asset(
     palette: list[tuple[int, int, int]] | None = None,
     max_colors: int | None = 16,
     bg_tolerance: int = 28,
+    despill: bool = True,
+    speck_filter: bool = True,
+    downsample_mode: str = "mode",
+    align_mode: str = "centroid",
 ) -> tuple[Image.Image, dict[str, Any]]:
     """Process raw generated image according to asset_type and return (output_image, metadata)."""
     if asset_type == "item":
@@ -378,6 +764,9 @@ def process_asset(
             palette=palette,
             max_colors=max_colors,
             bg_tolerance=bg_tolerance,
+            despill=despill,
+            speck_filter=speck_filter,
+            downsample_mode=downsample_mode,
         )
         return out, {"cols": 1, "rows": 1, "frames": 1, "sheet_size": out.size}
 
@@ -387,6 +776,7 @@ def process_asset(
             target_size=target_size,
             palette=palette,
             max_colors=max_colors,
+            downsample_mode=downsample_mode,
         )
         return out, {"cols": 1, "rows": 1, "frames": 1, "sheet_size": out.size}
 
@@ -401,6 +791,10 @@ def process_asset(
             palette=palette,
             max_colors=max_colors,
             bg_tolerance=bg_tolerance,
+            despill=despill,
+            speck_filter=speck_filter,
+            downsample_mode=downsample_mode,
+            align_mode=align_mode,
         )
         return sheet, {
             "cols": resolved_cols,
