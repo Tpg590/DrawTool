@@ -29,12 +29,21 @@ from src.pixel_processor import (
     VALID_ALIGN_MODES,
     VALID_DOWNSAMPLE_MODES,
     VALID_IDLE_STYLES,
+    export_animated_gif,
     parse_palette,
     parse_size,
     process_asset,
     process_idle_from_single,
+    resolve_default_bob_px,
+    slice_spritesheet_frames,
 )
-from src.prompt_optimizer import DEFAULT_STYLE, VALID_ASSET_TYPES, compute_grid, optimize_prompt
+from src.prompt_optimizer import (
+    DEFAULT_STYLE,
+    VALID_ASSET_TYPES,
+    VALID_FACINGS,
+    compute_grid,
+    optimize_prompt,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26")
@@ -44,7 +53,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "build_pixel_prompt",
         "description": (
-            "Build an optimized 2D 8-bit top-down pixel art prompt for item, tile, or anim spritesheet "
+            "Build an optimized 2D pixel art prompt for item, tile, anim, or character sprite "
             "generation, returning the final prompt and recommended generation dimensions."
         ),
         "inputSchema": {
@@ -55,15 +64,20 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": list(VALID_ASSET_TYPES),
                     "default": "item",
-                    "description": "Asset mode: item | tile | anim.",
+                    "description": "Asset mode: item | tile | anim | character.",
                 },
-                "size": {"type": "string", "default": "32x32", "description": "Target sprite/frame WxH."},
+                "size": {"type": "string", "description": "Target sprite/frame WxH (default: 64x64 for character, 32x32 otherwise)."},
                 "frames": {"type": "integer", "minimum": 1, "default": 4},
                 "cols": {"type": "integer", "minimum": 1, "description": "Grid columns for anim (defaults to frames)."},
                 "style": {
                     "type": "string",
                     "default": DEFAULT_STYLE,
-                    "description": "Style preset: 8bit-topdown | 16bit-topdown | anime-rpg-topdown | isometric-pixel.",
+                    "description": "Style preset: 8bit-topdown | 8bit-chibi-topdown | 16bit-topdown | anime-rpg-topdown | hibit-anime-side | isometric-pixel.",
+                },
+                "facing": {
+                    "type": "string",
+                    "enum": list(VALID_FACINGS),
+                    "description": "Optional facing direction: east | west | front | back.",
                 },
                 "bg_color": {
                     "type": "string",
@@ -93,7 +107,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "raw_image_path": {"type": "string", "description": "Path to raw input image."},
                 "name": {"type": "string", "description": "Output base filename (without extension)."},
                 "type": {"type": "string", "enum": list(VALID_ASSET_TYPES), "default": "item"},
-                "size": {"type": "string", "default": "32x32"},
+                "size": {"type": "string", "description": "Target sprite/frame WxH (default: 64x64 for character, 32x32 otherwise)."},
                 "frames": {"type": "integer", "minimum": 1, "default": 4},
                 "cols": {"type": "integer", "minimum": 1},
                 "fps": {"type": "number", "exclusiveMinimum": 0, "default": 8.0},
@@ -115,6 +129,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 },
                 "output_dir": {"type": "string", "description": "Output directory (default: ./output)."},
                 "skip_aseprite": {"type": "boolean", "default": False},
+                "export_gif": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Also export an animated transparent .gif preview alongside .aseprite and .png.",
+                },
             },
             "required": ["raw_image_path"],
         },
@@ -141,7 +160,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "enum": list(VALID_IDLE_STYLES),
                     "default": "bob",
                 },
-                "bob_px": {"type": "integer", "minimum": 0, "maximum": 8, "default": 1},
+                "bob_px": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16,
+                    "description": "Vertical bob amplitude in pixels (default: auto 1px for <=64px, 2px for 96-191px, 3px for >=192px).",
+                },
                 "style": {"type": "string", "default": DEFAULT_STYLE},
                 "palette": {"type": "string", "description": "Optional .gpl file or comma-separated hex list."},
                 "max_colors": {"type": "integer", "minimum": 0},
@@ -155,6 +179,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 },
                 "output_dir": {"type": "string", "description": "Output directory (default: ./output)."},
                 "skip_aseprite": {"type": "boolean", "default": False},
+                "export_gif": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Also export an animated transparent .gif preview alongside .aseprite and .png.",
+                },
             },
             "required": ["raw_image_path"],
         },
@@ -171,11 +200,20 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "prompt": {"type": "string"},
                 "name": {"type": "string"},
                 "type": {"type": "string", "enum": list(VALID_ASSET_TYPES), "default": "item"},
-                "size": {"type": "string", "default": "32x32"},
+                "size": {"type": "string", "description": "Target sprite/frame WxH (default: 64x64 for character, 32x32 otherwise)."},
                 "frames": {"type": "integer", "minimum": 1, "default": 4},
                 "cols": {"type": "integer", "minimum": 1},
                 "fps": {"type": "number", "exclusiveMinimum": 0, "default": 8.0},
-                "style": {"type": "string", "default": DEFAULT_STYLE},
+                "style": {
+                    "type": "string",
+                    "default": DEFAULT_STYLE,
+                    "description": "Style preset: 8bit-topdown | 8bit-chibi-topdown | 16bit-topdown | anime-rpg-topdown | hibit-anime-side | isometric-pixel.",
+                },
+                "facing": {
+                    "type": "string",
+                    "enum": list(VALID_FACINGS),
+                    "description": "Optional facing direction: east | west | front | back.",
+                },
                 "bg_color": {"type": "string"},
                 "action_notes": {"type": "string"},
                 "ref_path": {"type": "string"},
@@ -198,6 +236,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "use_cache": {"type": "boolean", "default": True},
                 "use_llm": {"type": "boolean", "default": True},
                 "skip_aseprite": {"type": "boolean", "default": False},
+                "export_gif": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Also export an animated transparent .gif preview alongside .aseprite and .png.",
+                },
             },
             "required": ["prompt"],
         },
@@ -241,6 +284,7 @@ def _package_processed_image(
     cache_dir: Path,
     cfg: AppConfig,
     skip_aseprite: bool,
+    export_gif: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -248,6 +292,17 @@ def _package_processed_image(
     staged_png = cache_dir / f"{stem}_processed.png"
     out_png = output_dir / f"{stem}.png"
     out_aseprite = output_dir / f"{stem}.aseprite"
+    out_gif = output_dir / f"{stem}.gif"
+
+    gif_path_str: str | None = None
+    if export_gif:
+        gif_frames = (
+            slice_spritesheet_frames(processed_img, target_size, frames, cols)
+            if asset_type == "anim"
+            else [processed_img]
+        )
+        export_animated_gif(gif_frames, out_gif, fps=fps)
+        gif_path_str = str(out_gif)
 
     if skip_aseprite:
         processed_img.save(out_png, format="PNG")
@@ -255,6 +310,7 @@ def _package_processed_image(
             "status": "png_only",
             "png_path": str(out_png),
             "aseprite_path": None,
+            "gif_path": gif_path_str,
         }
 
     processed_img.save(staged_png, format="PNG")
@@ -275,6 +331,7 @@ def _package_processed_image(
             "status": "ok",
             "aseprite_path": str(ase_res.aseprite_path),
             "png_path": str(ase_res.png_path),
+            "gif_path": gif_path_str,
             "lua_script_path": str(ase_res.lua_script_path),
             "aseprite_executable": str(ase_res.executable),
         }
@@ -298,6 +355,7 @@ def _package_processed_image(
             "status": "partial_png_only",
             "png_path": str(out_png),
             "aseprite_path": None,
+            "gif_path": gif_path_str,
             "lua_script_path": str(lua_path),
             "aseprite_error": str(exc),
         }
@@ -308,11 +366,13 @@ def _tool_build_pixel_prompt(args: dict[str, Any], cfg: AppConfig) -> dict[str, 
     if not prompt_text:
         raise ValueError("'prompt' is required.")
     asset_type = str(args.get("type", "item"))
-    target_size = parse_size(str(args.get("size", "32x32")))
+    default_size = "64x64" if asset_type == "character" else "32x32"
+    target_size = parse_size(str(args.get("size") or default_size))
     frames = int(args.get("frames", 4))
     cols_arg = args.get("cols")
     cols = int(cols_arg) if cols_arg is not None else None
     style = str(args.get("style") or cfg.default_style or DEFAULT_STYLE)
+    facing = str(args["facing"]) if args.get("facing") else None
     has_ref = bool(args.get("has_ref", False))
     use_llm = bool(args.get("use_llm", False))
     bg_color = str(args["bg_color"]) if args.get("bg_color") else None
@@ -330,6 +390,7 @@ def _tool_build_pixel_prompt(args: dict[str, Any], cfg: AppConfig) -> dict[str, 
         use_llm=use_llm,
         bg_color=bg_color,
         action_notes=action_notes,
+        facing=facing,
     )
     gen_size = choose_generation_size(
         target_size=target_size,
@@ -342,6 +403,7 @@ def _tool_build_pixel_prompt(args: dict[str, Any], cfg: AppConfig) -> dict[str, 
         "subject": res.subject,
         "asset_type": res.asset_type,
         "style": res.style,
+        "facing": res.facing,
         "target_size": f"{target_size[0]}x{target_size[1]}",
         "gen_size": f"{gen_size[0]}x{gen_size[1]}",
         "cols": res.cols,
@@ -359,7 +421,8 @@ def _tool_process_image_to_aseprite(args: dict[str, Any], cfg: AppConfig) -> dic
         raise FileNotFoundError(f"Raw image not found: {raw_path}")
 
     asset_type = str(args.get("type", "item"))
-    target_size = parse_size(str(args.get("size", "32x32")))
+    default_size = "64x64" if asset_type == "character" else "32x32"
+    target_size = parse_size(str(args.get("size") or default_size))
     frames = int(args.get("frames", 4))
     cols_arg = args.get("cols")
     cols, _ = compute_grid(frames, int(cols_arg) if cols_arg is not None else None) if asset_type == "anim" else (1, 1)
@@ -380,6 +443,7 @@ def _tool_process_image_to_aseprite(args: dict[str, Any], cfg: AppConfig) -> dic
     output_dir = _resolve_path(args.get("output_dir"), cfg.output_dir)
     cache_dir = _resolve_path(None, cfg.cache_dir)
     skip_aseprite = bool(args.get("skip_aseprite", False))
+    export_gif = bool(args.get("export_gif", False))
     bg_tolerance = int(args.get("bg_tolerance", 28))
     despill = bool(args.get("despill", True))
     speck_filter = bool(args.get("speck_filter", True))
@@ -414,6 +478,7 @@ def _tool_process_image_to_aseprite(args: dict[str, Any], cfg: AppConfig) -> dic
         cache_dir=cache_dir,
         cfg=cfg,
         skip_aseprite=skip_aseprite,
+        export_gif=export_gif,
     )
     pkg.update(
         {
@@ -442,7 +507,8 @@ def _tool_create_idle_animation(args: dict[str, Any], cfg: AppConfig) -> dict[st
     cols, rows = compute_grid(frames, int(cols_arg) if cols_arg is not None else None)
     fps = float(args.get("fps", 6.0))
     idle_style = str(args.get("idle_style", "bob"))
-    bob_px = int(args.get("bob_px", 1))
+    bob_px_arg = args.get("bob_px")
+    bob_px = resolve_default_bob_px(target_size) if bob_px_arg is None else int(bob_px_arg)
     style = str(args.get("style") or cfg.default_style or DEFAULT_STYLE)
 
     palette_arg = args.get("palette")
@@ -459,6 +525,7 @@ def _tool_create_idle_animation(args: dict[str, Any], cfg: AppConfig) -> dict[st
     output_dir = _resolve_path(args.get("output_dir"), cfg.output_dir)
     cache_dir = _resolve_path(None, cfg.cache_dir)
     skip_aseprite = bool(args.get("skip_aseprite", False))
+    export_gif = bool(args.get("export_gif", False))
 
     bg_tolerance = int(args.get("bg_tolerance", 28))
     despill = bool(args.get("despill", True))
@@ -493,6 +560,7 @@ def _tool_create_idle_animation(args: dict[str, Any], cfg: AppConfig) -> dict[st
         cache_dir=cache_dir,
         cfg=cfg,
         skip_aseprite=skip_aseprite,
+        export_gif=export_gif,
     )
     pkg.update(
         {
@@ -514,7 +582,8 @@ def _tool_generate_game_asset(args: dict[str, Any], cfg: AppConfig) -> dict[str,
     if not prompt_text:
         raise ValueError("'prompt' is required.")
     asset_type = str(args.get("type", "item"))
-    target_size = parse_size(str(args.get("size", "32x32")))
+    default_size = "64x64" if asset_type == "character" else "32x32"
+    target_size = parse_size(str(args.get("size") or default_size))
     frames = int(args.get("frames", 4))
     cols_arg = args.get("cols")
     cols, rows = compute_grid(frames, int(cols_arg) if cols_arg is not None else None) if asset_type == "anim" else (1, 1)
@@ -544,6 +613,7 @@ def _tool_generate_game_asset(args: dict[str, Any], cfg: AppConfig) -> dict[str,
 
     bg_color = str(args["bg_color"]) if args.get("bg_color") else None
     action_notes = str(args["action_notes"]) if args.get("action_notes") else None
+    facing = str(args["facing"]) if args.get("facing") else None
     bg_tolerance = int(args.get("bg_tolerance", 28))
     despill = bool(args.get("despill", True))
     speck_filter = bool(args.get("speck_filter", True))
@@ -562,6 +632,7 @@ def _tool_generate_game_asset(args: dict[str, Any], cfg: AppConfig) -> dict[str,
         use_llm=bool(args.get("use_llm", True)),
         bg_color=bg_color,
         action_notes=action_notes,
+        facing=facing,
     )
 
     provider = create_provider(cfg)
@@ -573,7 +644,7 @@ def _tool_generate_game_asset(args: dict[str, Any], cfg: AppConfig) -> dict[str,
         target_size=target_size,
         ref_path=ref_path,
         use_cache=bool(args.get("use_cache", True)),
-        extra_meta={"asset_type": asset_type, "style": style},
+        extra_meta={"asset_type": asset_type, "style": style, "facing": prompt_res.facing},
     )
 
     with Image.open(io.BytesIO(gen_res.image_bytes)) as raw_img:
@@ -604,10 +675,12 @@ def _tool_generate_game_asset(args: dict[str, Any], cfg: AppConfig) -> dict[str,
         cache_dir=cache_dir,
         cfg=cfg,
         skip_aseprite=bool(args.get("skip_aseprite", False)),
+        export_gif=bool(args.get("export_gif", False)),
     )
     pkg.update(
         {
             "final_prompt": prompt_res.final_prompt,
+            "facing": prompt_res.facing,
             "raw_cache_path": str(gen_res.cache_path),
             "from_cache": gen_res.from_cache,
             "provider": gen_res.provider,

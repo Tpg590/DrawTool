@@ -24,12 +24,21 @@ from src.pixel_processor import (
     VALID_ALIGN_MODES,
     VALID_DOWNSAMPLE_MODES,
     VALID_IDLE_STYLES,
+    export_animated_gif,
     parse_palette,
     parse_size,
     process_asset,
     process_idle_from_single,
+    resolve_default_bob_px,
+    slice_spritesheet_frames,
 )
-from src.prompt_optimizer import DEFAULT_STYLE, VALID_ASSET_TYPES, compute_grid, optimize_prompt
+from src.prompt_optimizer import (
+    DEFAULT_STYLE,
+    VALID_ASSET_TYPES,
+    VALID_FACINGS,
+    compute_grid,
+    optimize_prompt,
+)
 
 
 def slugify_name(text: str, max_len: int = 40) -> str:
@@ -52,12 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="asset_type",
         choices=VALID_ASSET_TYPES,
         default="item",
-        help="Asset mode: item | tile | anim (default: item).",
+        help="Asset mode: item | tile | anim | character (default: item).",
     )
     parser.add_argument(
         "--size",
-        default="32x32",
-        help="Target pixel size per sprite/frame WxH (default: 32x32).",
+        default=None,
+        help="Target pixel size per sprite/frame WxH (default: 64x64 for character, 32x32 otherwise).",
     )
     parser.add_argument(
         "--frames",
@@ -75,6 +84,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--style",
         default=None,
         help=f"Style preset name (default: {DEFAULT_STYLE}).",
+    )
+    parser.add_argument(
+        "--facing",
+        choices=VALID_FACINGS,
+        default=None,
+        help="Optional facing direction: east | west | front | back.",
+    )
+    parser.add_argument(
+        "--bg-color",
+        default=None,
+        help="Optional flat background color instruction (e.g. '#D0D0D0' or '#00FF00').",
     )
     parser.add_argument(
         "--ref",
@@ -134,6 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save processed PNG without invoking Aseprite CLI.",
     )
     parser.add_argument(
+        "--export-gif",
+        action="store_true",
+        help="Also export an animated transparent .gif preview alongside .aseprite and .png.",
+    )
+    parser.add_argument(
         "--bg-tolerance",
         type=int,
         default=28,
@@ -175,8 +200,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bob-px",
         type=int,
-        default=1,
-        help="Vertical bob amplitude in pixels for --idle-from-single (default: 1).",
+        default=None,
+        help="Vertical bob amplitude in pixels for --idle-from-single (default: auto 1px for <=64px, 2px for 96-191px, 3px for >=192px).",
     )
     parser.add_argument(
         "--config",
@@ -196,10 +221,12 @@ def resolve_max_colors(
         return None
     if cli_max_colors is not None:
         return None if cli_max_colors <= 0 else cli_max_colors
-    if style == DEFAULT_STYLE:
+    if style in (DEFAULT_STYLE, "8bit-chibi-topdown"):
         return 16
     if style in ("16bit-topdown", "anime-rpg-topdown"):
         return 32
+    if style == "hibit-anime-side":
+        return 64
     return None
 
 
@@ -207,11 +234,16 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
     """Execute prompt optimization, image acquisition, pixel processing, and Aseprite export."""
     cfg = config if config is not None else load_config(Path(args.config) if args.config else None)
     style = args.style or cfg.default_style or DEFAULT_STYLE
-    target_size = parse_size(args.size)
+    default_size = "64x64" if args.asset_type == "character" else "32x32"
+    target_size = parse_size(args.size or default_size)
 
     idle_from_single = bool(getattr(args, "idle_from_single", False))
     effective_asset_type = "anim" if idle_from_single else args.asset_type
-    prompt_asset_type = "item" if idle_from_single else args.asset_type
+    prompt_asset_type = (
+        "character"
+        if (idle_from_single and args.asset_type == "character")
+        else ("item" if idle_from_single else args.asset_type)
+    )
 
     if effective_asset_type == "anim":
         cols, rows = compute_grid(args.frames, args.cols)
@@ -240,6 +272,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
     stem = args.name.strip() if args.name else f"{effective_asset_type}_{slugify_name(args.prompt)}"
 
     # 1. Prompt Optimization (minimal/zero LLM tokens)
+    facing = getattr(args, "facing", None)
     prompt_res = optimize_prompt(
         user_prompt=args.prompt,
         asset_type=prompt_asset_type,
@@ -250,6 +283,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
         has_ref=ref_path is not None,
         config=cfg,
         use_llm=not args.no_llm,
+        bg_color=getattr(args, "bg_color", None),
+        facing=facing,
     )
     print(f"[1/4] Prompt ({'LLM+rules' if prompt_res.used_llm else 'deterministic'}): {prompt_res.final_prompt}")
 
@@ -299,12 +334,14 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
 
     with Image.open(io.BytesIO(raw_bytes)) as raw_img:
         if idle_from_single:
+            bob_px_arg = getattr(args, "bob_px", None)
+            bob_px = resolve_default_bob_px(target_size) if bob_px_arg is None else int(bob_px_arg)
             processed_img, _ = process_idle_from_single(
                 img=raw_img,
                 target_size=target_size,
                 frames=args.frames,
                 cols=cols,
-                bob_px=int(getattr(args, "bob_px", 1)),
+                bob_px=bob_px,
                 idle_style=str(getattr(args, "idle_style", "bob")),
                 palette=palette_colors,
                 max_colors=effective_max_colors,
@@ -338,12 +375,26 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
     staged_png = cache_dir / f"{stem}_processed.png"
     out_png = output_dir / f"{stem}.png"
     out_aseprite = output_dir / f"{stem}.aseprite"
+    out_gif = output_dir / f"{stem}.gif"
+    export_gif = bool(getattr(args, "export_gif", False))
+
+    def _maybe_export_gif() -> None:
+        if not export_gif:
+            return
+        gif_frames = (
+            slice_spritesheet_frames(processed_img, target_size, args.frames, cols)
+            if effective_asset_type == "anim"
+            else [processed_img]
+        )
+        export_animated_gif(gif_frames, out_gif, fps=args.fps)
+        print(f"[done] Exported GIF:      {out_gif}")
 
     if args.skip_aseprite:
         processed_img.save(out_png, format="PNG")
         print(
             f"[3/4] Processed PNG saved ({proc_meta['sheet_size'][0]}x{proc_meta['sheet_size'][1]}): {out_png}"
         )
+        _maybe_export_gif()
         print("[4/4] Skipped Aseprite packaging (--skip-aseprite).")
         return 0
 
@@ -369,11 +420,13 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig | None = None) -> i
     except AsepriteError as exc:
         # Preserve processed PNG in output_dir even if Aseprite binary isn't configured yet
         processed_img.save(out_png, format="PNG")
+        _maybe_export_gif()
         print(f"[warn] Saved processed PNG to {out_png}, but Aseprite step failed: {exc}", file=sys.stderr)
         return 3
 
     print(f"[4/4] Exported Aseprite: {ase_res.aseprite_path}")
     print(f"[done] Exported PNG:      {ase_res.png_path}")
+    _maybe_export_gif()
     return 0
 
 

@@ -10,17 +10,22 @@ import numpy as np
 from PIL import Image
 
 from src.pixel_processor import (
+    export_animated_gif,
     filter_small_components,
     generate_idle_frames,
     parse_palette,
     parse_size,
     process_anim,
+    process_asset,
+    process_character,
     process_idle_from_single,
     process_item,
     process_tile,
     quantize_image,
     remove_background,
     resize_pixel_art,
+    resolve_default_bob_px,
+    slice_spritesheet_frames,
 )
 
 
@@ -258,6 +263,81 @@ class PixelProcessorTests(unittest.TestCase):
                     b = fr.getbbox()
                     assert b is not None
                     self.assertEqual(b[3], b0[3])
+
+    def test_resolve_default_bob_px_scales_with_sprite_size(self) -> None:
+        self.assertEqual(resolve_default_bob_px((48, 48)), 1)
+        self.assertEqual(resolve_default_bob_px((128, 128)), 2)
+        self.assertEqual(resolve_default_bob_px((256, 256)), 3)
+
+    def test_slice_and_export_animated_gif_preserves_transparency_and_palette(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            arr = np.full((64, 64, 4), [230, 230, 230, 255], dtype=np.uint8)
+            arr[12:56, 20:44] = [180, 30, 45, 255]
+            raw = Image.fromarray(arr, mode="RGBA")
+            sheet, _ = process_idle_from_single(
+                raw,
+                target_size=(64, 64),
+                frames=4,
+                cols=2,
+                bob_px=2,
+                idle_style="bob",
+                max_colors=64,
+            )
+            frames = slice_spritesheet_frames(sheet, (64, 64), frames=4, cols=2)
+            self.assertEqual(len(frames), 4)
+
+            gif_path = Path(tmpdir) / "anim.gif"
+            export_animated_gif(frames, gif_path, fps=10.0)
+            self.assertTrue(gif_path.is_file())
+
+            with Image.open(gif_path) as gif_img:
+                self.assertEqual(gif_img.size, (64, 64))
+                self.assertEqual(getattr(gif_img, "n_frames", 1), 4)
+                self.assertEqual(gif_img.info.get("duration"), 100)
+                gif_img.seek(0)
+                f0 = gif_img.convert("RGBA")
+                f0_arr = np.array(f0)
+                self.assertEqual(f0_arr[0, 0, 3], 0)
+                self.assertEqual(f0_arr[32, 32, 3], 255)
+
+            # Also verify >255 unique colors fallback quantization path in export_animated_gif
+            many_colors = np.zeros((20, 20, 4), dtype=np.uint8)
+            for y in range(20):
+                for x in range(20):
+                    many_colors[y, x] = [(x * 12) % 255, (y * 12) % 255, (x + y * 7) % 255, 255]
+            many_colors[0, 0, 3] = 0
+            hi_frame1 = Image.fromarray(many_colors, mode="RGBA")
+            many_colors2 = many_colors.copy()
+            many_colors2[10, 10] = [255, 255, 255, 255]
+            hi_frame2 = Image.fromarray(many_colors2, mode="RGBA")
+            gif_hi = Path(tmpdir) / "anim_hi.gif"
+            export_animated_gif([hi_frame1, hi_frame2], gif_hi, fps=8.0)
+            with Image.open(gif_hi) as g_hi:
+                self.assertEqual(getattr(g_hi, "n_frames", 1), 2)
+                self.assertEqual(np.array(g_hi.convert("RGBA"))[0, 0, 3], 0)
+
+    def test_process_character_anchors_feet_and_quantizes_16_colors(self) -> None:
+        # 128x128 sprite in upper-left quadrant on #D0D0D0 background
+        arr = np.full((128, 128, 4), [208, 208, 208, 255], dtype=np.uint8)
+        for y in range(10, 70):
+            for x in range(15, 55):
+                arr[y, x] = [(x * 4) % 250, (y * 3) % 250, 120, 255]
+        raw = Image.fromarray(arr, mode="RGBA")
+
+        out = process_character(raw, target_size=(32, 32), max_colors=16, pad=1)
+        self.assertEqual(out.size, (32, 32))
+        bbox = out.getbbox()
+        assert bbox is not None
+        # Bottom-anchored to th - pad = 31
+        self.assertEqual(bbox[3], 31)
+        out_arr = np.array(out)
+        opaque = out_arr[out_arr[:, :, 3] == 255, :3]
+        self.assertLessEqual(len(np.unique(opaque, axis=0)), 16)
+
+        asset_out, meta = process_asset(raw, asset_type="character", target_size=(32, 32), max_colors=16)
+        self.assertEqual(asset_out.size, (32, 32))
+        self.assertEqual(meta["frames"], 1)
+        self.assertEqual(meta["sheet_size"], (32, 32))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,12 @@ LOCKED_8BIT_TOPDOWN_KEYWORDS = (
 
 STYLE_PRESETS: dict[str, str] = {
     "8bit-topdown": LOCKED_8BIT_TOPDOWN_KEYWORDS,
+    "8bit-chibi-topdown": (
+        "8-bit pixel art, top-down 2.5D 3/4 RPG game perspective, 2.5-head chibi character proportion, "
+        "cute compact silhouette with readable head and eyes, crisp 1px dark outline, "
+        "retro 8-bit limited 16-color palette, simple clean flat cel shading, "
+        "crisp pixel edges, no anti-aliasing, no 3D render, no text, no watermark"
+    ),
     "16bit-topdown": (
         "16-bit pixel art, top-down game view, retro SNES aesthetic, crisp pixel edges, "
         "limited color palette, clean cel shading, no anti-aliasing, no 3D render, "
@@ -33,6 +39,14 @@ STYLE_PRESETS: dict[str, str] = {
         "clean cel shading, strong silhouette readability, no anti-aliasing, no 3D render, "
         "no text, no watermark"
     ),
+    "hibit-anime-side": (
+        "high-resolution 32-bit anime pixel art, 2D side-scroller action RPG sprite aesthetic "
+        "(Castlevania / Metroidvania / modern hi-bit anime style), tall 4.5-head anime character proportion, "
+        "crisp selective colored outlines (sel-out) with darker hue-shifted contour pixels, "
+        "rich multi-tone cel shading with smooth hue-shifted pixel ramps, intricate hair and fabric flow, "
+        "rich 48 to 64 color palette, true 1:1 crisp pixel edges, no anti-aliasing blur, "
+        "no 3D render, no text, no watermark"
+    ),
     "isometric-pixel": (
         "isometric pixel art, 2D retro game asset, crisp pixel edges, "
         "limited color palette, simple clean shading, no anti-aliasing, no 3D render, "
@@ -40,7 +54,14 @@ STYLE_PRESETS: dict[str, str] = {
     ),
 }
 
-VALID_ASSET_TYPES = ("item", "tile", "anim")
+VALID_ASSET_TYPES = ("item", "tile", "anim", "character")
+VALID_FACINGS = ("east", "west", "front", "back")
+FACING_DESCRIPTIONS: dict[str, str] = {
+    "east": "strict 2D side-profile view facing right (east)",
+    "west": "strict 2D side-profile view facing left (west)",
+    "front": "facing straight forward toward camera",
+    "back": "facing directly away from camera (back view)",
+}
 
 
 @dataclass(frozen=True)
@@ -54,6 +75,19 @@ class PromptResult:
     used_llm: bool
     cols: int
     rows: int
+    facing: str | None = None
+
+
+def normalize_facing(facing: str | None) -> str | None:
+    """Validate and normalize optional facing direction."""
+    if facing is None:
+        return None
+    cleaned = facing.strip().lower()
+    if not cleaned:
+        return None
+    if cleaned not in VALID_FACINGS:
+        raise ValueError(f"Unsupported facing '{facing}'. Expected one of {VALID_FACINGS}.")
+    return cleaned
 
 
 def compute_grid(frames: int, cols: int | None = None) -> tuple[int, int]:
@@ -83,10 +117,17 @@ def build_type_layout_prompt(
     has_ref: bool = False,
     bg_color: str | None = None,
     action_notes: str | None = None,
+    style: str = DEFAULT_STYLE,
+    facing: str | None = None,
 ) -> str:
     """Build deterministic composition instructions tailored to item, tile, or anim."""
     if asset_type not in VALID_ASSET_TYPES:
         raise ValueError(f"Unsupported asset type '{asset_type}'. Expected one of {VALID_ASSET_TYPES}.")
+
+    norm_facing = normalize_facing(facing)
+    norm_style = (style or DEFAULT_STYLE).strip().lower()
+    is_side = "side" in norm_style
+    is_iso = "isometric" in norm_style
 
     w, h = size
     clean_bg = " ".join(bg_color.strip().split()) if bg_color else ""
@@ -96,17 +137,83 @@ def build_type_layout_prompt(
             if clean_bg
             else "solid uniform flat magenta or plain single-color background for clean background removal"
         )
-        layout = (
-            f"single isolated game item centered cleanly in frame, sized clearly for a {w}x{h} sprite, "
-            f"top-down 2D game perspective, {bg_phrase}, "
-            "strong silhouette and distinct 8-bit contrast shading"
-        )
+        if is_side:
+            layout = (
+                f"single isolated full-body game sprite centered cleanly in frame, sized clearly for a {w}x{h} sprite, "
+                f"2D side-view game perspective, {bg_phrase}, "
+                "strong silhouette, crisp selective colored outlines, and detailed multi-tone pixel shading"
+            )
+        elif is_iso:
+            layout = (
+                f"single isolated game item centered cleanly in frame, sized clearly for a {w}x{h} sprite, "
+                f"isometric 2D game perspective, {bg_phrase}, "
+                "strong silhouette and crisp pixel shading"
+            )
+        elif norm_style == DEFAULT_STYLE:
+            layout = (
+                f"single isolated game item centered cleanly in frame, sized clearly for a {w}x{h} sprite, "
+                f"top-down 2D game perspective, {bg_phrase}, "
+                "strong silhouette and distinct 8-bit contrast shading"
+            )
+        else:
+            layout = (
+                f"single isolated game item centered cleanly in frame, sized clearly for a {w}x{h} sprite, "
+                f"top-down 2D game perspective, {bg_phrase}, "
+                "strong silhouette and crisp pixel shading"
+            )
     elif asset_type == "tile":
+        if is_side:
+            perspective_tile = "2D side-scroller"
+        elif is_iso:
+            perspective_tile = "isometric"
+        else:
+            perspective_tile = "top-down"
         layout = (
-            f"seamless tileable top-down terrain texture filling the entire square edge-to-edge "
+            f"seamless tileable {perspective_tile} terrain texture filling the entire square edge-to-edge "
             f"for a {w}x{h} tile, uniform repeating micro-pattern, avoid isolated objects on borders "
             "so edges connect seamlessly without visible tile seams"
         )
+    elif asset_type == "character":
+        bg_phrase = (
+            f"solid uniform flat {clean_bg} background for clean background removal"
+            if clean_bg
+            else "solid uniform flat magenta or plain single-color background for clean background removal"
+        )
+        if "chibi" in norm_style:
+            layout = (
+                f"single isolated full-body 2D chibi RPG character sprite centered cleanly in frame, "
+                f"sized clearly for a {w}x{h} sprite, top-down 2.5D 3/4 RPG game perspective, "
+                f"2.5-head chibi proportion, standing pose with feet planted cleanly shoulder-width apart, "
+                f"{bg_phrase}, strong silhouette and distinct 8-bit contrast shading"
+            )
+        elif is_side:
+            layout = (
+                f"single isolated full-body 2D game character sprite centered cleanly in frame, "
+                f"sized clearly for a {w}x{h} sprite, 2D side-view game perspective, "
+                f"standing pose with feet planted cleanly, {bg_phrase}, "
+                "strong silhouette, crisp selective colored outlines, and detailed multi-tone pixel shading"
+            )
+        elif is_iso:
+            layout = (
+                f"single isolated full-body 2D RPG character sprite centered cleanly in frame, "
+                f"sized clearly for a {w}x{h} sprite, isometric 2D game perspective, "
+                f"standing pose with feet planted cleanly, {bg_phrase}, "
+                "strong silhouette and crisp pixel shading"
+            )
+        elif norm_style == DEFAULT_STYLE:
+            layout = (
+                f"single isolated full-body 2D RPG character sprite centered cleanly in frame, "
+                f"sized clearly for a {w}x{h} sprite, top-down 2.5D 3/4 RPG game perspective, "
+                f"standing pose with feet planted cleanly, {bg_phrase}, "
+                "strong silhouette and distinct 8-bit contrast shading"
+            )
+        else:
+            layout = (
+                f"single isolated full-body 2D RPG character sprite centered cleanly in frame, "
+                f"sized clearly for a {w}x{h} sprite, top-down 2.5D 3/4 RPG game perspective, "
+                f"standing pose with feet planted cleanly, {bg_phrase}, "
+                "strong silhouette and crisp pixel shading"
+            )
     else:
         resolved_cols, rows = compute_grid(frames, cols)
         bg_phrase = (
@@ -114,16 +221,24 @@ def build_type_layout_prompt(
             if clean_bg
             else "solid uniform flat single-color background"
         )
+        if is_side:
+            seq_perspective = "2D side-scroller readable motion sequence"
+        elif is_iso:
+            seq_perspective = "isometric RPG readable motion sequence"
+        else:
+            seq_perspective = "top-down RPG readable motion sequence"
         layout = (
             f"2D sprite sheet arranged in an exact {resolved_cols} columns by {rows} rows uniform grid "
             f"with {frames} animation frames ordered left-to-right top-to-bottom, each cell {w}x{h} proportion, "
-            "top-down RPG readable motion sequence, consistent character proportions, outfit, and colors "
+            f"{seq_perspective}, consistent character proportions, outfit, and colors "
             f"across every frame, {bg_phrase}, no visible grid lines or borders"
         )
         if action_notes and action_notes.strip():
             clean_notes = " ".join(action_notes.strip().split())
             layout += f", frame sequence: {clean_notes}"
 
+    if norm_facing:
+        layout += f", {FACING_DESCRIPTIONS[norm_facing]}"
     if has_ref:
         layout += ", match the visual design, proportions, and color palette of the reference image"
     return layout
@@ -139,12 +254,14 @@ def build_deterministic_prompt(
     has_ref: bool = False,
     bg_color: str | None = None,
     action_notes: str | None = None,
+    facing: str | None = None,
 ) -> str:
     """Assemble the complete deterministic image prompt without spending LLM tokens."""
     clean_subject = " ".join(subject.strip().split())
     if not clean_subject:
         raise ValueError("Prompt cannot be empty.")
 
+    norm_facing = normalize_facing(facing)
     layout = build_type_layout_prompt(
         asset_type=asset_type,
         size=size,
@@ -153,6 +270,8 @@ def build_deterministic_prompt(
         has_ref=has_ref,
         bg_color=bg_color,
         action_notes=action_notes,
+        style=style,
+        facing=norm_facing,
     )
     style_keywords = get_style_keywords(style)
     return f"{clean_subject}, {layout}, {style_keywords}"
@@ -239,9 +358,11 @@ def optimize_prompt(
     use_llm: bool = True,
     bg_color: str | None = None,
     action_notes: str | None = None,
+    facing: str | None = None,
 ) -> PromptResult:
     """Optimize prompt using optional tiny-token LLM translation + locked deterministic rules."""
     resolved_cols, rows = compute_grid(frames, cols) if asset_type == "anim" else (1, 1)
+    norm_facing = normalize_facing(facing)
     subject = " ".join(user_prompt.strip().split())
     used_llm = False
 
@@ -272,6 +393,7 @@ def optimize_prompt(
         has_ref=has_ref,
         bg_color=bg_color,
         action_notes=action_notes,
+        facing=norm_facing,
     )
     return PromptResult(
         subject=subject,
@@ -281,4 +403,5 @@ def optimize_prompt(
         used_llm=used_llm,
         cols=resolved_cols,
         rows=rows,
+        facing=norm_facing,
     )

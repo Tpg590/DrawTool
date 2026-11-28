@@ -1,6 +1,6 @@
 # DrawTool — CLI & MCP Server tạo Asset Game 2D Pixel Art + Aseprite
 
-Công cụ CLI và MCP server tự động hóa quy trình tạo asset game 2D (**`item`**, **`tile`**, **`anim`**) từ mô tả văn bản hoặc ảnh thô, hỗ trợ các preset `8bit-topdown`, `16bit-topdown`, `anime-rpg-topdown`, tối ưu token LLM và đóng gói ra file `.aseprite` (có sẵn layer `Base`, `Detail & Shading`, timeline + FPS) kèm `.png` thành phẩm.
+Công cụ CLI và MCP server tự động hóa quy trình tạo asset game 2D (**`item`**, **`tile`**, **`anim`**, **`character`**) từ mô tả văn bản hoặc ảnh thô, hỗ trợ các preset `8bit-topdown`, `8bit-chibi-topdown`, `16bit-topdown`, `anime-rpg-topdown`, `hibit-anime-side` (side-view hi-bit 128×128/256×256), tùy chọn hướng nhìn `--facing`, tối ưu token LLM và đóng gói ra file `.aseprite` (có sẵn layer `Base`, `Detail & Shading`, timeline + FPS) kèm `.png` và `.gif` động (`--export-gif`).
 
 ---
 
@@ -9,7 +9,7 @@ Công cụ CLI và MCP server tự động hóa quy trình tạo asset game 2D (
 - `drawtool.py` / `src/cli.py`: Giao diện dòng lệnh (`argparse`), điều phối toàn bộ pipeline.
 - `src/config.py`: Đọc `.env`, biến môi trường và file `config.json` (tùy chọn).
 - `src/prompt_optimizer.py`:
-  - Khóa cứng từ khóa phong cách mặc định `8bit-topdown`, hỗ trợ thêm `16bit-topdown`, `anime-rpg-topdown`, `isometric-pixel`.
+  - Khóa cứng từ khóa phong cách mặc định `8bit-topdown`, hỗ trợ thêm `8bit-chibi-topdown` (nhân vật chibi 2.5D top-down 32×32 8-bit), `16bit-topdown`, `anime-rpg-topdown`, `hibit-anime-side`, `isometric-pixel`.
   - Hỗ trợ tùy chọn `bg_color` (màu nền phẳng chống ám viền) và `action_notes` (kịch bản tư thế từng frame cho `anim`).
   - Chế độ mặc định dùng 0 token LLM (deterministic), hoặc tùy chọn gọi LLM chỉ để dịch/tối ưu mô tả chủ thể ngắn gọn.
 - `src/image_gen.py`:
@@ -80,6 +80,11 @@ ASEPRITE_PATH=C:\Program Files\Aseprite\Aseprite.exe
 python drawtool.py --prompt "bình máu đỏ nắp gỗ" --type item --size 32x32 --output-dir ./output
 ```
 
+### Tạo Nhân vật Chibi Top-Down 2.5D 32x32 8-bit (`character`)
+```bash
+python drawtool.py --prompt "chibi knight in blue armor with silver sword" --type character --style 8bit-chibi-topdown --size 32x32 --facing front --bg-color "#D0D0D0" --output-dir ./output
+```
+
 ### Tạo Tile địa hình liền mạch (`tile`)
 ```bash
 python drawtool.py --prompt "cỏ xanh có hoa nhỏ" --type tile --size 16x16 --max-colors 16 --output-dir ./output
@@ -107,8 +112,8 @@ python drawtool.py --prompt "nhân vật hiệp sĩ đi bộ" --type anim --size
 
 `DrawTool` đi kèm MCP stdio server thuần Python (`mcp_server.py`, không cần cài thêm thư viện ngoài) với **5 tools**:
 
-1. `build_pixel_prompt`: Sinh prompt chuẩn 2D pixel art (`8bit-topdown`, `16bit-topdown`, `anime-rpg-topdown`) + kích thước ảnh gợi ý; hỗ trợ `bg_color` và `action_notes`.
-2. `process_image_to_aseprite`: Nhận ảnh thô bất kỳ (từ Gemini Web, Antigravity `image-generator`, hoặc file local), tách nền + khử viền `despill`, lọc đốm rác `speck_filter`, thu nhỏ `mode`, căn chỉnh `centroid`, ghép spritesheet / nối cạnh tile, ép bảng màu và đóng gói thành `.aseprite` + `.png`.
+1. `build_pixel_prompt`: Sinh prompt chuẩn 2D pixel art (`8bit-topdown`, `8bit-chibi-topdown`, `16bit-topdown`, `anime-rpg-topdown`, `hibit-anime-side`) cho `item`, `tile`, `anim`, `character` + kích thước ảnh gợi ý; hỗ trợ `bg_color`, `facing` và `action_notes`.
+2. `process_image_to_aseprite`: Nhận ảnh thô bất kỳ (từ Gemini Web, Antigravity `image-generator`, hoặc file local), tách nền + khử viền `despill`, lọc đốm rác `speck_filter`, thu nhỏ `mode`, căn chỉnh `centroid` (và neo chân đáy với `character`/`anim`), ghép spritesheet / nối cạnh tile, ép bảng màu và đóng gói thành `.aseprite` + `.png`.
 3. `create_idle_animation`: Nhận **1 ảnh nhân vật đơn**, xử lý sạch rồi tạo luôn spritesheet Idle `4` hoặc `6` frame (`bob` / `breathe` / `float`) đồng bộ 100% không mọc thêm chi tiết lạ, xuất thẳng `.aseprite` + `.png`.
 4. `generate_game_asset`: Chạy trọn quy trình từ prompt → gọi `IMAGE_PROVIDER` → xử lý pixel → xuất `.aseprite` + `.png`.
 5. `check_aseprite_status`: Kiểm tra đường dẫn `aseprite` và trạng thái cấu hình provider.
@@ -147,33 +152,78 @@ python -m unittest discover -s tests -v
 | **Item đơn giản** (thuốc, xu, chìa) | `16x16` hoặc `32x32` | `8bit-topdown` (`16`) | `#D0D0D0` (xám nhạt) hoặc `#FF00FF` | Đồ thủy tinh/trong suốt **bắt buộc ưu tiên `#D0D0D0`** để không bị ám hồng/xanh |
 | **Item chi tiết** (kiếm, sách phép, giáp) | `32x32` hoặc `48x48` | `16bit-topdown` (`24–32`) | `#D0D0D0` (xám nhạt) | Viền tối 1px tách bạch nền |
 | **Tilemap** (cỏ, đá, nước, sàn) | `16x16` hoặc `32x32` | `8bit-topdown` (`16`) hoặc `16bit-topdown` (`24`) | **Không có nền** (phủ kín 100% khung) | Dùng chung 1 `--palette` cho các tile cùng khu vực |
+| **Character 8-bit Chibi Top-Down 2.5D** | `32x32` | `8bit-chibi-topdown` (`16`) | `#D0D0D0` (xám nhạt) hoặc `#FF00FF` | Dùng `--type character --facing front\|back\|east\|west`, tỉ lệ đầu 2.5 chibi |
 | **Character Idle (cơ bản)** | `48x48` hoặc `64x64` | `anime-rpg-topdown` (`24–32`) | `#D0D0D0` hoặc `#00FF00` | Vẽ **1 sprite đơn** rồi chạy `create_idle_animation` |
 | **Character Action (`walk`/`run`/`attack`)** | `48x48` hoặc `64x64` | `anime-rpg-topdown` (`24–32`) | `#D0D0D0` hoặc `#00FF00` | Dùng **4 frame** + ảnh tham chiếu + `action_notes` từng frame |
+| **Hi-Bit Anime Side-View (Metroidvania / Castlevania)** | `128x128` hoặc `256x256` | `hibit-anime-side` (`64`) | `#D0D0D0` (xám nhạt) | Dùng `--facing east` (hoặc `west`) + `--export-gif` để xuất thêm `.gif` động |
 
 > **Mẹo chọn size cho nhân vật RPG anime:** `32x32` chỉ phù hợp nhân vật chibi cực tối giản (~15px bề ngang). Muốn nhìn rõ tóc mái, mắt anime, cổ áo choàng và vũ khí hãy dùng **`48x48`** (chuẩn retro hiện đại) hoặc **`64x64`**.
 
 ---
 
-### 7.1. Prompt mẫu cho `Item`
+### 7.1. Quy tắc & Prompt mẫu cho `Item`
+
+> **Quy tắc bất biến khi viết Prompt `Item`:**
+> - **Đơn lẻ & Căn giữa:** Chỉ mô tả **1 vật phẩm duy nhất** nằm gọn giữa khung (`single isolated game item centered cleanly in frame`), không bị cắt mép.
+> - **Chặn nhân vật, bàn tay & khung UI:** Luôn thêm `no human, no hands, no character, no drop shadow, no UI frame, no text` (đặc biệt quan trọng khi chạy model Anime như SD WebUI / Animagine XL để tránh AI tự vẽ tay cầm vật phẩm hoặc khung ô đồ).
+> - **Góc nhìn & Hướng đặt chuẩn Icon:**
+>   - Tiêu hao / hộp / rương / prop: `top-down 2D RPG icon view` hoặc `top-down 3/4 RPG game perspective`.
+>   - Vũ khí dài (kiếm, gậy, rìu, dao): đặt chéo 45° (`45-degree diagonal icon angle`) để tận dụng đường chéo ô vuông.
+>   - Trang bị / khiên / giáp / nhẫn: `front-facing RPG inventory icon`.
+> - **Silhouette rõ & Tối giản chi tiết theo Size:** Ở `16x16`–`32x32` chỉ giữ 1 hình khối chính + 1–2 điểm nhấn, dùng viền tối 1px khép kín (`crisp 1px dark outline`), đổ bóng phẳng (`clean flat pixel shading` / `clean cel shading`), ánh sáng thống nhất (`top-left light source`), không anti-aliasing.
+> - **Quy tắc Màu nền (`--bg-color`) & Tách nền:**
+>   - Luôn truyền `--bg-color` (CLI) / `bg_color` (MCP) khớp với màu nền trong prompt để tránh xung đột với mặc định `magenta or plain single-color` của `src/prompt_optimizer.py`.
+>   - Ưu tiên `#D0D0D0` (xám nhạt), **bắt buộc** cho đồ thủy tinh / pha lê / vật phát sáng để tránh ám viền màu.
+>   - Với item màu trắng / bạc / xám nhạt (hộp y tế trắng, kiếm bạc): giữ viền tối 1px khép kín và hạ `--bg-tolerance 18`–`22`, hoặc dùng nền tương phản (`#00FF00` / `#FF00FF`) kèm `--despill` (mặc định bật).
+>   - Tránh bóng đổ mềm dưới đất (`no ground shadow`) để flood-fill tách nền không giữ lại vệt xám.
+> - **Chọn Size, Style & Đồng bộ bộ Item:** `16x16` (`8bit-topdown`, 16 màu) cho icon siêu gọn; `32x32` (`8bit-topdown` / `16bit-topdown`, 16–24 màu) là chuẩn RPG; `48x48`–`64x64` (`16bit-topdown`, 24–32 màu) cho item chi tiết; dùng chung `--style` và `--palette` cho toàn bộ item cùng game.
+
+#### Công thức Modular 5 Slot cho `Item`
+
+```text
+[Slot 1: Vật thể & Chất liệu] + [Slot 2: Màu sắc & Điểm nhấn] + [Slot 3: Góc nhìn & Bố cục] + [Slot 4: Nét vẽ & Đổ bóng] + [Slot 5: Nền & Từ khóa chặn]
+```
+
+| Slot | Vai trò | Ví dụ chuẩn |
+| :--- | :--- | :--- |
+| **Slot 1** | Vật thể đơn lẻ & chất liệu | `single isolated medieval silver longsword with leather-wrapped grip` |
+| **Slot 2** | Màu sắc chính & điểm nhấn | `bright steel blade, gold crossguard, ocean-blue hilt wrap, crisp specular edge` |
+| **Slot 3** | Góc nhìn, hướng đặt & kích thước | `slight 45-degree diagonal icon angle, centered cleanly in frame, sized for a 32x32 RPG inventory icon` |
+| **Slot 4** | Viền, đổ bóng & ánh sáng | `crisp 1px dark outline, clean cel shading, top-left light source, 16-bit pixel art, no anti-aliasing` |
+| **Slot 5** | Nền phẳng & từ khóa chặn | `solid uniform flat light gray (#D0D0D0) background, no human, no hands, no drop shadow, no UI frame, no text` |
+
+```bash
+# Ví dụ chạy CLI khớp --bg-color với prompt
+python drawtool.py --prompt "red health potion in a round glass bottle with wooden cork" --type item --size 32x32 --style 8bit-topdown --bg-color "#D0D0D0" --output-dir ./output
+```
 
 #### A. Vật phẩm tiêu hao / Thủy tinh (Bình máu, Lọ Mana)
 ```text
-red health potion in a round glass bottle with a brown wooden cork stopper, bright crimson liquid inside with a tiny white specular highlight, crisp 1px dark outline, clean flat pixel shading, single isolated game item centered in frame, sized clearly for a 32x32 sprite, top-down 2D RPG icon view, solid uniform flat neutral light gray (#D0D0D0) background, no anti-aliasing, no text
+red health potion in a round glass bottle with a brown wooden cork stopper, bright crimson liquid inside with a tiny white specular highlight, crisp 1px dark outline, clean flat pixel shading, top-left light source, single isolated game item centered in frame, sized clearly for a 32x32 sprite, top-down 2D RPG icon view, solid uniform flat neutral light gray (#D0D0D0) background, no human, no hands, no drop shadow, no UI frame, no anti-aliasing, no text
 ```
 *(Đổi màu nhanh: thay `red health potion ... crimson liquid` thành `blue mana potion ... glowing cyan liquid` hoặc `antidote potion ... emerald green liquid`.)*
 
 #### B. Vũ khí & Trang bị (Kiếm, Gậy phép, Khiên)
 ```text
-medieval silver longsword with a gold crossguard and ocean-blue leather grip, slight 45-degree diagonal icon angle, crisp 1px dark outline, strong metallic contrast highlights, single isolated game item centered cleanly in frame, sized for a 32x32 sprite, 16-bit pixel art RPG inventory icon, solid uniform flat neutral light gray (#D0D0D0) background, no text
+medieval silver longsword with a gold crossguard and ocean-blue leather grip, slight 45-degree diagonal icon angle, crisp 1px dark outline, strong metallic contrast highlights, top-left light source, single isolated game item centered cleanly in frame, sized for a 32x32 sprite, 16-bit pixel art RPG inventory icon, solid uniform flat neutral light gray (#D0D0D0) background, no human, no hands, no drop shadow, no UI frame, no text
 ```
 ```text
-ornate wooden mage staff topped with a glowing cyan crystal and gold prongs, crisp 1px dark outline, clean cel shading, single isolated game item centered cleanly in frame, sized for a 32x32 sprite, 16-bit pixel art RPG inventory icon, solid uniform flat neutral light gray (#D0D0D0) background, no text
+ornate wooden mage staff topped with a glowing cyan crystal and gold prongs, slight 45-degree diagonal icon angle, crisp 1px dark outline, clean cel shading, single isolated game item centered cleanly in frame, sized for a 32x32 sprite, 16-bit pixel art RPG inventory icon, solid uniform flat neutral light gray (#D0D0D0) background, no human, no hands, no drop shadow, no UI frame, no text
 ```
 
 #### C. Rương báu & Prop tương tác
 ```text
-closed medieval wooden treasure chest reinforced with iron bands and a gold lock, top-down 3/4 RPG game perspective, crisp 1px dark outline, distinct wood grain pixel clusters, single isolated game prop centered in frame, sized for a 32x32 sprite, 8-bit pixel art, solid uniform flat neutral light gray (#D0D0D0) background, no text
+closed medieval wooden treasure chest reinforced with iron bands and a gold lock, top-down 3/4 RPG game perspective, crisp 1px dark outline, distinct wood grain pixel clusters, single isolated game prop centered in frame, sized for a 32x32 sprite, 8-bit pixel art, solid uniform flat neutral light gray (#D0D0D0) background, no human, no hands, no drop shadow, no UI frame, no text
 ```
+
+#### D. Thảo dược & Vật phẩm y tế / Sinh tồn
+```text
+single isolated RPG healing herb bundle, fresh lush green medicinal herb with 3 to 4 slender pointed leaves tied neatly at the base, warm emerald green foliage with gentle lime-green highlights, simple clean silhouette, crisp 1px dark outline, clean cel shading, centered RPG inventory icon sized for a 32x32 or 64x64 sprite, solid uniform flat light gray (#D0D0D0) background, no human, no hands, no pot, no drop shadow, no text
+```
+```text
+single post-apocalyptic first aid medkit box, worn white metal case with crisp red cross emblem and dark metal clasp, top-down 3/4 RPG inventory icon, crisp 1px dark outline, clean cel shading, centered cleanly in frame sized for a 32x32 sprite, solid uniform flat light gray (#D0D0D0) background, no human, no hands, no drop shadow, no text
+```
+*(Mẹo với hộp y tế trắng trên nền `#D0D0D0`: giữ viền tối 1px khép kín và dùng `--bg-tolerance 18` để không ăn lẹm vào phần vỏ trắng.)*
 
 ---
 
@@ -376,6 +426,96 @@ Frame 2: collapses down onto both knees, head bowed, cloak pooling around.
 Frame 3: falls forward/sideways onto the ground.
 Frame 4: lying flat unconscious on ground, cloak spread neatly around.
 ```
+
+---
+
+#### E. Hi-Bit Anime Side-View (`128x128` / `256x256` + GIF — `--style hibit-anime-side`)
+
+Phù hợp game side-scroller / Metroidvania / Castlevania (tỷ lệ 4.5 đầu, selective colored outline, 48–64 màu, xuất thêm `.gif` động):
+
+```bash
+# Tạo Idle 6 frame 256x256 hướng Đông (east) từ 1 ảnh gốc + xuất GIF
+python drawtool.py --prompt "demoness gothic anime girl" --style hibit-anime-side --facing east --idle-from-single --size 256x256 --frames 6 --cols 3 --fps 8 --raw-image ./char_side_raw.png --name char_idle_east --export-gif
+```
+
+Prompt mẫu **Base Sprite (`256x256`, `facing=east`)**:
+```text
+single isolated gothic anime demoness character in strict 2D side-profile view facing right (east), tall 4.5-head anime proportion, curved dark-crimson horns, long voluminous wavy silver-white hair flowing down to calves, sharp crimson eyes, black and crimson gothic kimono-style dress with fur trim and thigh-high boots, heels, relaxed standing pose, crisp selective colored outlines (sel-out), rich multi-tone cel shading, 48 to 64 color palette, true 1:1 pixel art sized clearly for a 256x256 sprite, solid uniform flat #D0D0D0 background, no text
+```
+
+> **Mẹo tạo Walk / Action `256x256`:** Luôn sinh Base Sprite đơn `256x256` trước rồi truyền làm `--ref` với lưới `2x2` (`--frames 4 --cols 2`) hoặc `3x2` (`--frames 6 --cols 3`) + `--export-gif`.
+
+---
+
+### 7.4. Quy tắc & Prompt mẫu cho Nhân vật 2D Pixel Top-Down 2.5D Chibi 32x32 8-bit (`character`)
+
+> **Quy tắc bất biến khi vẽ nhân vật `32x32` 8-bit 2.5D Chibi:**
+> - **Tỷ lệ 2.5-head Chibi:** Đầu chiếm ~45–50% chiều cao (khoảng `13–15px` trên tổng `30px` chiều cao nhân vật), thân gọn `10–12px`, chân ngắn `4–5px` để mắt, tóc và mũ/giáp vẫn đọc rõ khi thu về `32x32`.
+> - **Tối giản chi tiết & 3–4 mảng màu chính:** Ở `32x32` (16 màu 8-bit), tránh mô tả hoa văn nhỏ, ren, chữ hay trang sức li ti; tập trung vào **1 màu tóc + 1 màu áo/giáp + 1 màu điểm nhấn + 1 phụ kiện/vũ khí lớn**.
+> - **Góc nhìn 2.5D Top-Down 3/4:** Luôn mô tả `top-down 2.5D 3/4 RPG perspective, full-body standing pose, feet planted cleanly` để thấy được đỉnh đầu, vai và hai bàn chân đứng vững (không bị cắt chân hay thành ảnh chân dung).
+> - **Viền tối 1px & Nền phẳng `#D0D0D0`:** Luôn dùng `crisp 1px dark outline, clean flat cel shading, solid uniform flat light gray (#D0D0D0) background, no ground shadow` để tool tách nền sạch và neo chân xuống đáy `32x32`.
+> - **4 hướng nhìn (`--facing`):** Dùng `--facing front` (nhìn thẳng), `back` (quay lưng), `east` (quay phải), `west` (quay trái).
+
+#### Công thức Modular 5 Slot cho Nhân vật `32x32` 8-bit Chibi
+
+```text
+[Slot 1: Kiểu nhân vật & Tỷ lệ] + [Slot 2: Tóc, Mắt & Biểu cảm] + [Slot 3: Trang phục & Vũ khí đơn giản] + [Slot 4: Góc nhìn, Size & Nét 8-bit] + [Slot 5: Nền & Từ khóa chặn]
+```
+
+| Slot | Vai trò | Ví dụ chuẩn |
+| :--- | :--- | :--- |
+| **Slot 1** | Chủ thể & Tỷ lệ | `single isolated cute 2.5-head chibi RPG knight character, full body standing pose` |
+| **Slot 2** | Tóc, mắt & mũ | `short brown spiky hair, big expressive dark pixel eyes, open silver steel helmet` |
+| **Slot 3** | Trang phục & Vũ khí | `cobalt blue tunic with silver chestplate, small round shield, short steel sword in right hand, dark brown boots` |
+| **Slot 4** | Góc nhìn, Size & Nét 8-bit | `top-down 2.5D 3/4 RPG game perspective, facing forward, crisp 1px dark outline, clean flat 8-bit pixel shading, limited 16-color palette, sized clearly for a 32x32 sprite` |
+| **Slot 5** | Nền phẳng & Từ khóa chặn | `solid uniform flat light gray (#D0D0D0) background, no ground shadow, no sprite sheet, no text` |
+
+#### 3 cách chạy để test ngay
+
+1. **Cách 1 — Chạy trực tiếp bằng DrawTool CLI (`drawtool.py`):**
+```bash
+python drawtool.py --prompt "cute 2.5-head chibi RPG knight in cobalt blue armor, silver helmet, short sword and round shield" --type character --style 8bit-chibi-topdown --size 32x32 --facing front --bg-color "#D0D0D0" --name chibi_knight_32
+```
+
+2. **Cách 2 — Chạy Local SD WebUI Forge 2-Stage (Paint-First → Pixel-Craft, 0% vỡ nét):**
+```powershell
+python .agents/skills/sdwebui-item-enhancer/scripts/sdwebui_item_gen.py `
+  --mode character `
+  --facing front `
+  --prompt "cute 2.5-head chibi RPG knight, brown spiky hair, big expressive eyes, cobalt blue armor with silver chestplate, short sword and round shield, dark brown boots" `
+  --name chibi_knight `
+  --pixel-size 32 `
+  --max-colors 16 `
+  --candidates 3
+```
+*(Sau khi kiểm tra `output/chibi_knight_raw.png`, đóng gói thành `.aseprite` + `.png` bằng `drawtool.py --type character --style 8bit-chibi-topdown --size 32x32 --downsample-mode nearest --bg-tolerance 18 --no-despill --raw-image output/chibi_knight_raw.png --name chibi_knight_32` hoặc gọi MCP `process_image_to_aseprite`.)*
+
+3. **Cách 3 — Nhắn trực tiếp trong Chat với Antigravity (dùng MCP `drawtool-aseprite`):**
+> *"Vẽ nhân vật 2D pixel top-down 2.5D chibi 32x32 8-bit: [dán prompt mẫu bên dưới], đóng gói thành .aseprite và .png giúp tôi."*
+
+#### Bộ Prompt mẫu sẵn sàng Copy-Paste (`32x32` 8-bit Chibi)
+
+- **A. Hiệp sĩ Chibi (Knight — `front`):**
+```text
+single isolated cute 2.5-head chibi RPG knight character, full body standing pose, open silver visor helmet showing big expressive pixel eyes, cobalt blue armor with gold trim, small round shield in left hand, short silver sword in right hand, sturdy brown boots planted cleanly, top-down 2.5D 3/4 RPG game perspective, facing forward, crisp 1px dark outline, retro 8-bit limited 16-color palette, clean flat cel shading, sized clearly for a 32x32 sprite, solid uniform flat light gray (#D0D0D0) background, no ground shadow, no sprite sheet, no text
+```
+
+- **B. Pháp sư Chibi (Mage — `front`):**
+```text
+single isolated cute 2.5-head chibi RPG mage girl, full body standing pose, pointed dark-purple witch hat with gold buckle, bright blonde bob hair, big expressive blue eyes, violet robe with yellow belt, holding wooden staff topped with glowing cyan gem, small dark boots, top-down 2.5D 3/4 RPG game perspective, facing forward, crisp 1px dark outline, retro 8-bit limited 16-color palette, clean flat cel shading, sized clearly for a 32x32 sprite, solid uniform flat light gray (#D0D0D0) background, no ground shadow, no sprite sheet, no text
+```
+
+- **C. Cung thủ / Thợ săn Chibi (Ranger — `front`):**
+```text
+single isolated cute 2.5-head chibi RPG forest ranger, full body standing pose, emerald green hooded cloak, ginger hair bangs, sharp green eyes, brown leather tunic and quiver on back, holding a simple curved wooden bow, dark boots, top-down 2.5D 3/4 RPG game perspective, facing forward, crisp 1px dark outline, retro 8-bit limited 16-color palette, clean flat cel shading, sized clearly for a 32x32 sprite, solid uniform flat light gray (#D0D0D0) background, no ground shadow, no sprite sheet, no text
+```
+
+- **D. Quái vật / Goblin Chibi (Monster NPC — `front`):**
+```text
+single isolated cute 2.5-head chibi RPG green goblin warrior, full body standing pose, big pointy ears, expressive yellow eyes, ragged brown leather vest, holding a small wooden club, bare feet planted cleanly, top-down 2.5D 3/4 RPG game perspective, facing forward, crisp 1px dark outline, retro 8-bit limited 16-color palette, clean flat cel shading, sized clearly for a 32x32 sprite, solid uniform flat light gray (#D0D0D0) background, no ground shadow, no sprite sheet, no text
+```
+
+> **Mẹo biến thành Idle Animation `32x32` ngay lập tức:** Sau khi có ảnh nhân vật `32x32` ưng ý, chạy thêm `--idle-from-single --idle-style bob --bob-px 1 --size 32x32 --frames 4 --cols 4 --fps 6 --style 8bit-chibi-topdown` (hoặc gọi MCP `create_idle_animation`) để có ngay file `.aseprite` Idle 4 frame chân đứng yên, đầu/thân nhún nhịp nhàng!
 
 ---
 

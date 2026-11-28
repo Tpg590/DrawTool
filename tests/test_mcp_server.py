@@ -203,6 +203,73 @@ class McpServerTests(unittest.TestCase):
             self.assertEqual(data["idle_style"], "bob")
             self.assertTrue(Path(data["png_path"]).is_file())
 
+    def test_mcp_hibit_side_facing_auto_bob_and_export_gif(self) -> None:
+        cfg = AppConfig()
+        prompt_resp = handle_jsonrpc_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 31,
+                "method": "tools/call",
+                "params": {
+                    "name": "build_pixel_prompt",
+                    "arguments": {
+                        "prompt": "gothic demoness",
+                        "type": "item",
+                        "size": "256x256",
+                        "style": "hibit-anime-side",
+                        "facing": "east",
+                    },
+                },
+            },
+            config=cfg,
+        )
+        assert prompt_resp is not None
+        self.assertFalse(prompt_resp["result"]["isError"])
+        p_data = json.loads(prompt_resp["result"]["content"][0]["text"])
+        self.assertEqual(p_data["facing"], "east")
+        self.assertIn("32-bit anime pixel art", p_data["final_prompt"])
+        self.assertIn("facing right (east)", p_data["final_prompt"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_path = root / "side_256.png"
+            _write_sample_raw(raw_path, size=(256, 256))
+            out_dir = root / "out"
+            cfg_tmp = AppConfig(cache_dir=root / "cache", output_dir=out_dir)
+
+            idle_resp = handle_jsonrpc_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 32,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "create_idle_animation",
+                        "arguments": {
+                            "raw_image_path": str(raw_path),
+                            "name": "side_idle_256",
+                            "size": "256x256",
+                            "frames": 4,
+                            "cols": 2,
+                            "fps": 8,
+                            "style": "hibit-anime-side",
+                            "output_dir": str(out_dir),
+                            "skip_aseprite": True,
+                            "export_gif": True,
+                        },
+                    },
+                },
+                config=cfg_tmp,
+            )
+            assert idle_resp is not None
+            self.assertFalse(idle_resp["result"]["isError"])
+            i_data = json.loads(idle_resp["result"]["content"][0]["text"])
+            self.assertEqual(i_data["bob_px"], 3)
+            self.assertIsNotNone(i_data["gif_path"])
+            self.assertTrue(Path(i_data["gif_path"]).is_file())
+            with Image.open(i_data["gif_path"]) as gif_img:
+                self.assertEqual(gif_img.size, (256, 256))
+                self.assertEqual(getattr(gif_img, "n_frames", 1), 4)
+
     def test_check_aseprite_status_does_not_leak_secrets(self) -> None:
         cfg = AppConfig(image_provider="gemini", image_api_key="AIzaSUPERSECRET123")
         resp = handle_jsonrpc_request(
@@ -253,6 +320,68 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(r3["id"], 3)
         prompt_data = json.loads(r3["result"]["content"][0]["text"])
         self.assertIn("gold coin", prompt_data["final_prompt"])
+
+    def test_mcp_character_8bit_chibi_topdown_32x32(self) -> None:
+        cfg = AppConfig()
+        prompt_resp = handle_jsonrpc_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 41,
+                "method": "tools/call",
+                "params": {
+                    "name": "build_pixel_prompt",
+                    "arguments": {
+                        "prompt": "chibi mage girl",
+                        "type": "character",
+                        "size": "32x32",
+                        "style": "8bit-chibi-topdown",
+                        "facing": "front",
+                        "bg_color": "#D0D0D0",
+                    },
+                },
+            },
+            config=cfg,
+        )
+        assert prompt_resp is not None
+        self.assertFalse(prompt_resp["result"]["isError"])
+        p_data = json.loads(prompt_resp["result"]["content"][0]["text"])
+        self.assertEqual(p_data["asset_type"], "character")
+        self.assertEqual(p_data["facing"], "front")
+        self.assertIn("2.5-head chibi", p_data["final_prompt"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_path = root / "chibi_raw.png"
+            _write_sample_raw(raw_path, size=(64, 64))
+            out_dir = root / "out"
+            cfg_tmp = AppConfig(cache_dir=root / "cache", output_dir=out_dir)
+
+            proc_resp = handle_jsonrpc_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 42,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "process_image_to_aseprite",
+                        "arguments": {
+                            "raw_image_path": str(raw_path),
+                            "name": "chibi_mage_32",
+                            "type": "character",
+                            "size": "32x32",
+                            "style": "8bit-chibi-topdown",
+                            "output_dir": str(out_dir),
+                            "skip_aseprite": True,
+                        },
+                    },
+                },
+                config=cfg_tmp,
+            )
+            assert proc_resp is not None
+            self.assertFalse(proc_resp["result"]["isError"])
+            proc_data = json.loads(proc_resp["result"]["content"][0]["text"])
+            self.assertEqual(proc_data["asset_type"], "character")
+            self.assertEqual(proc_data["sheet_size"], "32x32")
+            self.assertTrue(Path(proc_data["png_path"]).is_file())
 
 
 if __name__ == "__main__":

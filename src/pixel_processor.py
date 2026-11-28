@@ -338,6 +338,8 @@ def resize_pixel_art(
             x1 = max(x0 + 1, int(xs[ox + 1]))
             bw = x1 - x0
             block = arr[y0:y1, x0:x1]
+            if int(block[:, :, 3].max()) < 128:
+                continue
             opaque_mask = block[:, :, 3] >= 128
             opaque_ratio = float(np.mean(opaque_mask))
             if opaque_ratio < 0.42:
@@ -456,6 +458,51 @@ def process_item(
     canvas = Image.new("RGBA", target_size, (0, 0, 0, 0))
     paste_x = (target_size[0] - new_w) // 2
     paste_y = (target_size[1] - new_h) // 2
+    canvas.paste(resized, (paste_x, paste_y), resized)
+    return quantize_image(canvas, palette=palette, max_colors=max_colors)
+
+
+def process_character(
+    img: Image.Image,
+    target_size: tuple[int, int],
+    palette: list[tuple[int, int, int]] | None = None,
+    max_colors: int | None = 16,
+    pad: int = 1,
+    bg_tolerance: int = 28,
+    despill: bool = True,
+    speck_filter: bool = True,
+    downsample_mode: str = "mode",
+    align_mode: str = "centroid",
+) -> Image.Image:
+    """Process a single character sprite with centroid horizontal alignment and bottom-anchored feet."""
+    if align_mode not in VALID_ALIGN_MODES:
+        raise ValueError(f"Unsupported align_mode '{align_mode}'. Expected one of {VALID_ALIGN_MODES}.")
+
+    cleaned = remove_background(img, tolerance=bg_tolerance, despill=despill)
+    if speck_filter:
+        cleaned = filter_small_components(cleaned)
+    bbox = cleaned.getbbox()
+    if bbox is None:
+        return Image.new("RGBA", target_size, (0, 0, 0, 0))
+
+    cropped = cleaned.crop(bbox)
+    cw, ch = cropped.size
+    tw, th = target_size
+    inner_w, inner_h = _compute_inner_box(target_size, pad)
+    scale = min(inner_w / cw, inner_h / ch)
+    new_w = max(1, min(inner_w, int(round(cw * scale))))
+    new_h = max(1, min(inner_h, int(round(ch * scale))))
+
+    resized = resize_pixel_art(cropped, (new_w, new_h), mode=downsample_mode)
+    canvas = Image.new("RGBA", target_size, (0, 0, 0, 0))
+    if align_mode == "centroid":
+        cx = _opaque_centroid_x(resized)
+        paste_x = max(0, min(tw - new_w, int(round((tw / 2.0) - cx))))
+    else:
+        paste_x = (tw - new_w) // 2
+
+    effective_pad = pad if (tw > pad * 2 + 2 and th > pad * 2 + 2) else 0
+    paste_y = max(0, th - effective_pad - new_h)
     canvas.paste(resized, (paste_x, paste_y), resized)
     return quantize_image(canvas, palette=palette, max_colors=max_colors)
 
@@ -770,6 +817,20 @@ def process_asset(
         )
         return out, {"cols": 1, "rows": 1, "frames": 1, "sheet_size": out.size}
 
+    if asset_type == "character":
+        out = process_character(
+            img=img,
+            target_size=target_size,
+            palette=palette,
+            max_colors=max_colors,
+            bg_tolerance=bg_tolerance,
+            despill=despill,
+            speck_filter=speck_filter,
+            downsample_mode=downsample_mode,
+            align_mode=align_mode,
+        )
+        return out, {"cols": 1, "rows": 1, "frames": 1, "sheet_size": out.size}
+
     if asset_type == "tile":
         out = process_tile(
             img=img,
@@ -804,3 +865,127 @@ def process_asset(
         }
 
     raise ValueError(f"Unsupported asset_type: {asset_type}")
+
+
+def resolve_default_bob_px(target_size: tuple[int, int]) -> int:
+    """Choose a proportional vertical bob amplitude (in pixels) for the sprite's resolution."""
+    max_dim = max(target_size)
+    if max_dim >= 192:
+        return 3
+    if max_dim >= 96:
+        return 2
+    return 1
+
+
+def slice_spritesheet_frames(
+    sheet: Image.Image,
+    target_size: tuple[int, int],
+    frames: int,
+    cols: int,
+) -> list[Image.Image]:
+    """Slice a processed spritesheet into individual RGBA frame images."""
+    if frames < 1:
+        raise ValueError(f"frames must be >= 1, got {frames}")
+    if cols < 1:
+        raise ValueError(f"cols must be >= 1, got {cols}")
+    tw, th = target_size
+    rgba = sheet.convert("RGBA")
+    sliced: list[Image.Image] = []
+    for idx in range(frames):
+        col = idx % cols
+        row = idx // cols
+        sliced.append(rgba.crop((col * tw, row * th, (col + 1) * tw, (row + 1) * th)))
+    return sliced
+
+
+def export_animated_gif(
+    frames: list[Image.Image],
+    out_gif: Path,
+    fps: float = 8.0,
+) -> Path:
+    """Export RGBA frames as a transparent animated GIF using a shared 255-color + transparency palette."""
+    if not frames:
+        raise ValueError("Cannot export GIF from empty frame list.")
+    if fps <= 0:
+        raise ValueError(f"fps must be > 0, got {fps}")
+
+    duration_ms = max(20, int(round(1000.0 / float(fps))))
+    rgba_arrays = [np.array(fr.convert("RGBA"), dtype=np.uint8) for fr in frames]
+
+    opaque_chunks = [arr[arr[:, :, 3] >= 128, :3] for arr in rgba_arrays]
+    non_empty = [chunk for chunk in opaque_chunks if len(chunk) > 0]
+
+    trans_idx = 255
+    use_exact = True
+    packed_pal: np.ndarray | None = None
+    pal_img: Image.Image | None = None
+
+    if non_empty:
+        all_opaque = np.concatenate(non_empty, axis=0)
+        unique_rgb = np.unique(all_opaque, axis=0)
+        if len(unique_rgb) <= 255:
+            palette_rgb = unique_rgb
+            packed_pal = (
+                (palette_rgb[:, 0].astype(np.int32) << 16)
+                | (palette_rgb[:, 1].astype(np.int32) << 8)
+                | palette_rgb[:, 2].astype(np.int32)
+            )
+            flat_rgb = palette_rgb.reshape(-1).tolist()
+        else:
+            use_exact = False
+            strip = Image.fromarray(unique_rgb.reshape(1, -1, 3), mode="RGB")
+            q_strip = strip.quantize(
+                colors=255,
+                method=Image.Quantize.MEDIANCUT,
+                dither=Image.Dither.NONE,
+            )
+            flat_rgb = list(q_strip.getpalette()[: 255 * 3])
+            pal_img = Image.new("P", (1, 1))
+            pal_img.putpalette(flat_rgb + [0] * (768 - len(flat_rgb)))
+    else:
+        flat_rgb = [0, 0, 0]
+        packed_pal = np.array([0], dtype=np.int32)
+
+    palette_flat = flat_rgb + [0] * (768 - len(flat_rgb))
+
+    gif_frames: list[Image.Image] = []
+    for arr in rgba_arrays:
+        h, w, _ = arr.shape
+        idx_arr = np.full((h, w), trans_idx, dtype=np.uint8)
+        opaque_mask = arr[:, :, 3] >= 128
+        if np.any(opaque_mask):
+            opaque_rgb = arr[opaque_mask, :3]
+            if use_exact:
+                assert packed_pal is not None
+                packed_px = (
+                    (opaque_rgb[:, 0].astype(np.int32) << 16)
+                    | (opaque_rgb[:, 1].astype(np.int32) << 8)
+                    | opaque_rgb[:, 2].astype(np.int32)
+                )
+                idx_arr[opaque_mask] = np.searchsorted(packed_pal, packed_px).astype(np.uint8)
+            else:
+                assert pal_img is not None
+                mapped = Image.fromarray(opaque_rgb.reshape(1, -1, 3), mode="RGB").quantize(
+                    palette=pal_img,
+                    dither=Image.Dither.NONE,
+                )
+                idx_arr[opaque_mask] = np.array(mapped, dtype=np.uint8).reshape(-1)
+
+        p_img = Image.fromarray(idx_arr, mode="P")
+        p_img.putpalette(palette_flat)
+        p_img.info["transparency"] = trans_idx
+        gif_frames.append(p_img)
+
+    out_gif.parent.mkdir(parents=True, exist_ok=True)
+    gif_frames[0].save(
+        out_gif,
+        format="GIF",
+        save_all=True,
+        append_images=gif_frames[1:],
+        duration=duration_ms,
+        loop=0,
+        transparency=trans_idx,
+        disposal=2,
+        optimize=False,
+    )
+    return out_gif

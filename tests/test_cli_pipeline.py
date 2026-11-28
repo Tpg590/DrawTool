@@ -13,7 +13,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from src.cli import main
+from src.cli import main, resolve_max_colors
 from src.config import load_config
 from src.image_gen import ImageGenError, ImageGeneratorClient, ImageProvider
 
@@ -207,6 +207,93 @@ class CliAndConfigTests(unittest.TestCase):
             self.assertTrue(out_png.is_file())
             with Image.open(out_png) as img:
                 self.assertEqual(img.size, (96, 64))
+
+    def test_cli_hibit_side_with_facing_and_export_gif(self) -> None:
+        self.assertEqual(resolve_max_colors("hibit-anime-side", False, None), 64)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_path = root / "side_char.png"
+            raw_path.write_bytes(_make_sample_png_bytes((128, 128)))
+            out_dir = root / "output"
+            cache_dir = root / "cache"
+
+            rc = main(
+                [
+                    "--prompt",
+                    "gothic demoness",
+                    "--style",
+                    "hibit-anime-side",
+                    "--facing",
+                    "east",
+                    "--idle-from-single",
+                    "--size",
+                    "128x128",
+                    "--frames",
+                    "4",
+                    "--cols",
+                    "2",
+                    "--fps",
+                    "8",
+                    "--raw-image",
+                    str(raw_path),
+                    "--output-dir",
+                    str(out_dir),
+                    "--cache-dir",
+                    str(cache_dir),
+                    "--name",
+                    "demoness_idle",
+                    "--export-gif",
+                    "--skip-aseprite",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            out_png = out_dir / "demoness_idle.png"
+            out_gif = out_dir / "demoness_idle.gif"
+            self.assertTrue(out_png.is_file())
+            self.assertTrue(out_gif.is_file())
+            with Image.open(out_gif) as gif_img:
+                self.assertEqual(gif_img.size, (128, 128))
+                self.assertEqual(getattr(gif_img, "n_frames", 1), 4)
+
+    def test_cli_character_8bit_chibi_topdown_32x32(self) -> None:
+        self.assertEqual(resolve_max_colors("8bit-chibi-topdown", False, None), 16)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_path = root / "chibi.png"
+            raw_path.write_bytes(_make_sample_png_bytes((64, 64)))
+            out_dir = root / "output"
+            cache_dir = root / "cache"
+
+            rc = main(
+                [
+                    "--prompt",
+                    "chibi knight in blue armor",
+                    "--type",
+                    "character",
+                    "--style",
+                    "8bit-chibi-topdown",
+                    "--size",
+                    "32x32",
+                    "--facing",
+                    "front",
+                    "--bg-color",
+                    "#D0D0D0",
+                    "--raw-image",
+                    str(raw_path),
+                    "--output-dir",
+                    str(out_dir),
+                    "--cache-dir",
+                    str(cache_dir),
+                    "--name",
+                    "chibi_knight",
+                    "--skip-aseprite",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            out_png = out_dir / "chibi_knight.png"
+            self.assertTrue(out_png.is_file())
+            with Image.open(out_png) as img:
+                self.assertEqual(img.size, (32, 32))
 
 
 if __name__ == "__main__":

@@ -125,6 +125,49 @@ class PromptOptimizerTests(unittest.TestCase):
         self.assertIn("neutral light gray (#D0D0D0)", prompt)
         self.assertIn("frame sequence: 1: idle, 2: step left, 3: idle, 4: step right", prompt)
 
+    def test_hibit_anime_side_preset_and_facing(self) -> None:
+        for asset_type in ("item", "tile", "anim"):
+            prompt = build_deterministic_prompt(
+                subject="gothic demoness with silver hair",
+                asset_type=asset_type,
+                size=(256, 256),
+                frames=4,
+                cols=2,
+                style="hibit-anime-side",
+                facing="east",
+            )
+            self.assertIn("32-bit anime pixel art", prompt)
+            self.assertIn("selective colored outlines", prompt)
+            self.assertIn("facing right (east)", prompt)
+            self.assertNotIn("top-down", prompt.lower())
+            self.assertNotIn("8-bit", prompt.lower())
+
+    def test_invalid_facing_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            build_deterministic_prompt(
+                subject="hero",
+                asset_type="item",
+                size=(128, 128),
+                style="hibit-anime-side",
+                facing="diagonal",
+            )
+
+    def test_character_8bit_chibi_topdown_preset_and_facing(self) -> None:
+        prompt = build_deterministic_prompt(
+            subject="cute chibi knight in blue armor",
+            asset_type="character",
+            size=(32, 32),
+            style="8bit-chibi-topdown",
+            bg_color="#D0D0D0",
+            facing="front",
+        )
+        self.assertIn("2.5-head chibi", prompt)
+        self.assertIn("top-down 2.5D 3/4 RPG game perspective", prompt)
+        self.assertIn("32x32", prompt)
+        self.assertIn("8-bit pixel art", prompt)
+        self.assertIn("#D0D0D0", prompt)
+        self.assertIn("facing straight forward toward camera", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
